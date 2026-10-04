@@ -328,6 +328,41 @@ class TestVirtualPrinterInstance:
         instance._mqtt.set_gcode_state.assert_called_once_with("FINISH", filename="test.3mf", prepare_percent="100")
 
     @pytest.mark.asyncio
+    async def test_project_file_releases_non_proxy_vp_after_late_mqtt_ack(self, instance):
+        """#31: FTP-first slicer flows set FINISH before MQTT project_file sets
+        PREPARE. A non-proxy VP must schedule a final FINISH release or the
+        slicer permanently treats it as busy."""
+        instance.mode = "immediate"
+        instance._mqtt = MagicMock()
+
+        with patch.object(instance, "_schedule_finish_release") as schedule_release:
+            await instance.on_print_command("bare_model_name", {"file": "bare_model_name.gcode.3mf"})
+
+        schedule_release.assert_called_once_with("bare_model_name")
+
+    @pytest.mark.asyncio
+    async def test_queue_project_file_options_are_keyed_by_uploaded_filename(self, tmp_path):
+        """#31: project_file's subtask_name is bare while the FTP callback uses
+        the .gcode.3mf basename; use data.file so queue options correlate."""
+        from backend.app.services.virtual_printer.manager import VirtualPrinterInstance
+
+        instance = VirtualPrinterInstance(
+            vp_id=31,
+            name="QueueVP",
+            mode="print_queue",
+            model="C12",
+            access_code="12345678",
+            serial_suffix="391800031",
+            base_dir=tmp_path,
+        )
+        uploaded_name = "bare_model_name.gcode.3mf"
+        options = {"file": uploaded_name, "timelapse": True, "bed_leveling": False}
+
+        await instance.on_print_command("bare_model_name", options)
+
+        assert instance._slicer_print_options == {uploaded_name: options}
+
+    @pytest.mark.asyncio
     async def test_on_file_received_non_3mf_does_not_touch_state(self, instance):
         """Non-3MF uploads (e.g., a job's auxiliary files) must not transition
         the visible state — the slicer is only tracking the .3mf upload."""
@@ -2949,3 +2984,30 @@ class TestSSDPProxyName:
         rewritten = ssdp_proxy_without_name._rewrite_ssdp(packet)
 
         assert b"DevName.bambu.com: RealPrinter - Proxy" in rewritten
+
+
+class TestVirtualPrinterFTPPostUpload:
+    @pytest.mark.asyncio
+    async def test_schedules_post_upload_callback_without_blocking_session(self, tmp_path):
+        """#31: the FTP control session must be free for MQTT project_file while
+        queue ingestion waits for slicer options."""
+        from backend.app.services.virtual_printer.ftp_server import VirtualPrinterFTPServer
+
+        callback = AsyncMock()
+        server = VirtualPrinterFTPServer(
+            upload_dir=tmp_path / "uploads",
+            access_code="12345678",
+            cert_path=tmp_path / "cert.pem",
+            key_path=tmp_path / "key.pem",
+            on_file_received=callback,
+        )
+        uploaded = tmp_path / "model.gcode.3mf"
+
+        server._schedule_file_received(uploaded, "192.0.2.1")
+
+        callback.assert_not_awaited()
+        await asyncio.sleep(0)
+        callback.assert_awaited_once_with(uploaded, "192.0.2.1")
+        await asyncio.gather(*server._file_callback_tasks)
+        await asyncio.sleep(0)
+        assert not server._file_callback_tasks

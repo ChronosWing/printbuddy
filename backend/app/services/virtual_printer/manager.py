@@ -186,6 +186,10 @@ class VirtualPrinterInstance:
         self._ssdp: VirtualPrinterSSDPServer | None = None
         self._ssdp_proxy: SSDPProxy | None = None
         self._tasks: list[asyncio.Task] = []
+        # Non-proxy Print flow can deliver MQTT project_file after FTP has
+        # already set FINISH. Keep the delayed release task so a late project
+        # acknowledgement cannot leave the synthetic state at PREPARE (#31).
+        self._finish_release_task: asyncio.Task | None = None
         self._target_printer_connection_suspended = False
 
     @property
@@ -260,12 +264,45 @@ class VirtualPrinterInstance:
         uptime.
         """
         logger.info("[VP %s] Print command for: %s", self.name, filename)
+        if self.mode != "proxy" and filename and self._mqtt is not None:
+            self._schedule_finish_release(filename)
         if self.mode != "print_queue":
             return
-        self._slicer_print_options[filename] = dict(data)
-        event = self._slicer_print_options_events.get(filename)
+
+        # `filename` is project_file's bare subtask_name, while the FTP
+        # callback uses the uploaded filename (including .gcode.3mf). Key the
+        # cache from `file` so both paths correlate (#31).
+        stash_key = Path(data.get("file") or filename).name
+        self._slicer_print_options[stash_key] = dict(data)
+        event = self._slicer_print_options_events.get(stash_key)
         if event:
             event.set()
+
+    def _schedule_finish_release(self, filename: str, delay: float = 1.5) -> None:
+        """Re-set non-proxy synthetic state to FINISH after project_file ack.
+
+        Bambu Studio can send FTP first and MQTT project_file second. In that
+        ordering the ack changes a completed synthetic VP from FINISH back to
+        PREPARE, which makes the slicer reject all later jobs as busy (#31).
+        """
+        if self._mqtt is None:
+            return
+        if self._finish_release_task and not self._finish_release_task.done():
+            self._finish_release_task.cancel()
+        self._finish_release_task = asyncio.create_task(
+            self._delayed_finish_release(filename, delay),
+            name=f"vp-{self.id}-finish-release",
+        )
+
+    async def _delayed_finish_release(self, filename: str, delay: float) -> None:
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        if self._mqtt is None:
+            return
+        self._mqtt.set_gcode_state("FINISH", filename=filename, prepare_percent="100")
+        logger.debug("[VP %s] Re-set gcode_state=FINISH after project_file ack (%s)", self.name, filename)
 
     async def _archive_file(self, file_path: Path, source_ip: str) -> None:
         """Archive file immediately."""
@@ -761,6 +798,13 @@ class VirtualPrinterInstance:
 
     async def stop_server(self) -> None:
         """Stop server-mode services."""
+        if self._finish_release_task and not self._finish_release_task.done():
+            self._finish_release_task.cancel()
+            try:
+                await self._finish_release_task
+            except asyncio.CancelledError:
+                pass
+        self._finish_release_task = None
         if self._mqtt_bridge:
             try:
                 await self._mqtt_bridge.stop()
