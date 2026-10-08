@@ -639,7 +639,13 @@ class NotificationService:
         if isinstance(raw_recipients, list):
             results = []
             for recipient in raw_recipients:
-                if not isinstance(recipient, dict) or recipient.get("enabled", True) in (False, "false", "False", "0", 0):
+                if not isinstance(recipient, dict) or recipient.get("enabled", True) in (
+                    False,
+                    "false",
+                    "False",
+                    "0",
+                    0,
+                ):
                     continue
                 device_config = {**config, **recipient}
                 device_config.pop("recipients", None)

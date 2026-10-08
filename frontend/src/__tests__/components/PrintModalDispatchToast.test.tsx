@@ -72,9 +72,10 @@ describe('PrintModal dispatch toast', () => {
     });
     await user.click(screen.getByText('X1 Carbon'));
 
-    // Submit the print
+    // Submit the print and explicitly confirm the default-on missing-spool warning.
     const printButton = screen.getByRole('button', { name: /^print$/i });
     await user.click(printButton);
+    await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
     // Wait for the API call to complete and modal to close
     await waitFor(() => {

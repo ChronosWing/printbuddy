@@ -274,6 +274,7 @@ describe('PrintModal', () => {
       expect(screen.queryByText('First Layer Inspection')).not.toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
       await waitFor(() => {
         expect(capturedBody).not.toBeNull();
@@ -1258,6 +1259,7 @@ describe('PrintModal', () => {
       });
 
       await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
       await waitFor(() => {
         expect(capturedBody).not.toBeNull();
@@ -1294,6 +1296,7 @@ describe('PrintModal', () => {
       });
 
       await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
       await waitFor(() => {
         expect(capturedBody).not.toBeNull();
@@ -1362,6 +1365,7 @@ describe('PrintModal', () => {
       });
 
       await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
       await waitFor(() => {
         expect(capturedBody).not.toBeNull();
@@ -1395,6 +1399,7 @@ describe('PrintModal', () => {
       });
 
       await user.click(screen.getByRole('button', { name: /^print$/i }));
+      await user.click(await screen.findByRole('button', { name: 'Start Print Anyway' }));
 
       await waitFor(() => {
         expect(capturedBody).not.toBeNull();

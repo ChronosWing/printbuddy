@@ -77,8 +77,20 @@ async def test_multi_recipient_print_creates_and_tracks_one_activity_per_recipie
         {
             "base_url": "https://push.getnotifyapp.com",
             "recipients": [
-                {"id": "marko-phone", "device_id": "MARKO_DEVICE", "device_token": "marko-token", "enabled": True, "live_activities_enabled": True},
-                {"id": "workshop-phone", "device_id": "WORKSHOP_DEVICE", "device_token": "workshop-token", "enabled": True, "live_activities_enabled": True},
+                {
+                    "id": "marko-phone",
+                    "device_id": "MARKO_DEVICE",
+                    "device_token": "marko-token",
+                    "enabled": True,
+                    "live_activities_enabled": True,
+                },
+                {
+                    "id": "workshop-phone",
+                    "device_id": "WORKSHOP_DEVICE",
+                    "device_token": "workshop-token",
+                    "enabled": True,
+                    "live_activities_enabled": True,
+                },
             ],
         }
     )
@@ -185,14 +197,16 @@ async def test_print_start_uses_configured_native_tile_countdown(db_session, not
 
 @pytest.mark.asyncio
 async def test_print_start_uses_configured_live_activity_button(db_session, notify_provider):
-    notify_provider.config = json.dumps({
-        "device_id": "DEVICE123",
-        "device_token": "token",
-        "live_activities_enabled": True,
-        "live_activity_button_enabled": "true",
-        "live_activity_button_title": "Pause",
-        "live_activity_button_url": "https://octoprint.example.com/api/pause",
-    })
+    notify_provider.config = json.dumps(
+        {
+            "device_id": "DEVICE123",
+            "device_token": "token",
+            "live_activities_enabled": True,
+            "live_activity_button_enabled": "true",
+            "live_activity_button_title": "Pause",
+            "live_activity_button_url": "https://octoprint.example.com/api/pause",
+        }
+    )
     await db_session.commit()
     client = AsyncMock()
     client.start = AsyncMock(return_value="activity-123")

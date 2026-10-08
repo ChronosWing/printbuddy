@@ -2300,7 +2300,9 @@ async def download_library_files_as_zip(
                 file = files_by_id[file_id]
                 abs_path = to_absolute_path(file.file_path)
                 if not abs_path or not abs_path.is_file():
-                    raise HTTPException(status_code=404, detail=f"Selected file is not available on disk: {file.filename}")
+                    raise HTTPException(
+                        status_code=404, detail=f"Selected file is not available on disk: {file.filename}"
+                    )
 
                 archive_name = Path(file.filename).name or f"file-{file.id}"
                 stem, suffix = Path(archive_name).stem, Path(archive_name).suffix

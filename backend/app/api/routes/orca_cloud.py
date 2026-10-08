@@ -587,7 +587,9 @@ async def device_poll(
         # Pairing is not persisted without confirmation of its client/scope.
         svc.clear_tokens()
         await _clear_pending_device(db, current_user)
-        raise HTTPException(status_code=502, detail="Orca Cloud pairing could not be verified. Please try again.") from e
+        raise HTTPException(
+            status_code=502, detail="Orca Cloud pairing could not be verified. Please try again."
+        ) from e
 
     await _persist_tokens(db, current_user, svc.access_token, svc.refresh_token, svc.token_expiry, None, user_id)
     return OrcaDevicePollResponse(status=DevicePoll.COMPLETE, connected=True, email=None, user_id=user_id)

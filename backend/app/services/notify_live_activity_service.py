@@ -668,11 +668,15 @@ class NotifyLiveActivityService:
             device_token = str(raw.get("device_token") or "").strip()
             if not device_id or not device_token:
                 continue
-            recipients.append((recipient_id, {**provider_config, **raw, "device_id": device_id, "device_token": device_token}))
+            recipients.append(
+                (recipient_id, {**provider_config, **raw, "device_id": device_id, "device_token": device_token})
+            )
         return recipients
 
     @classmethod
-    def _live_activity_recipient_config(cls, provider_config: dict[str, Any], recipient_id: str) -> dict[str, Any] | None:
+    def _live_activity_recipient_config(
+        cls, provider_config: dict[str, Any], recipient_id: str
+    ) -> dict[str, Any] | None:
         for candidate_id, config in cls._live_activity_recipients(provider_config):
             if candidate_id == recipient_id:
                 return config
