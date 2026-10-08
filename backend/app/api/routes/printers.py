@@ -66,6 +66,7 @@ router = APIRouter(prefix="/printers", tags=["printers"])
 
 
 PRINTABLE_PRINTER_FILE_EXTENSIONS = {".gcode", ".gco", ".g", ".bgcode", ".3mf"}
+PRUSALINK_FIRMWARE_FILE_EXTENSION = ".bbf"
 PROVIDER_UPLOAD_RECONCILE_ATTEMPTS = 30
 PROVIDER_UPLOAD_RECONCILE_INTERVAL_SECONDS = 1.0
 
@@ -81,6 +82,17 @@ def _safe_remote_upload_path(directory: str, filename: str) -> str:
         raise HTTPException(400, "Invalid filename")
     if not _is_printable_printer_file(safe_name):
         raise HTTPException(400, "Unsupported printer file type")
+    normalized_dir = "/" + directory.strip("/") if directory.strip("/") else ""
+    return f"{normalized_dir}/{safe_name}"
+
+
+def _safe_prusalink_firmware_upload_path(directory: str, filename: str) -> str:
+    """Return a safe printer-storage path for a Prusa firmware package only."""
+    safe_name = Path(filename).name.strip()
+    if not safe_name or safe_name in {".", ".."}:
+        raise HTTPException(400, "Invalid filename")
+    if not safe_name.lower().endswith(PRUSALINK_FIRMWARE_FILE_EXTENSION):
+        raise HTTPException(400, "Unsupported firmware file type. Upload a .bbf file.")
     normalized_dir = "/" + directory.strip("/") if directory.strip("/") else ""
     return f"{normalized_dir}/{safe_name}"
 
@@ -1480,6 +1492,97 @@ async def upload_printer_file(
             response["original_filename"] = Path(original_remote_path).name
         if replaced:
             response["replaced"] = True
+    return response
+
+
+@router.post("/{printer_id}/files/firmware/upload")
+async def upload_prusalink_firmware_file(
+    printer_id: int,
+    file: UploadFile = File(...),
+    path: str = "/",
+    storage: str | None = Query(default=None),
+    overwrite: bool = Query(default=False),
+    conflict_strategy: str = Query(default="error", pattern="^(error|rename|delete_replace)$"),
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload a Prusa ``.bbf`` firmware package to printer storage without starting it.
+
+    Firmware packages intentionally bypass print-file parsing and are unavailable
+    to the regular print/start/queue routes. Installation remains a printer-side
+    action performed through Prusa's supported firmware-update flow.
+    """
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+    if (printer.provider or "").lower() != "prusalink":
+        raise HTTPException(400, "Firmware upload is only supported for PrusaLink printers")
+
+    remote_path = _safe_prusalink_firmware_upload_path(path, file.filename or "firmware.bbf")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=PRUSALINK_FIRMWARE_FILE_EXTENSION) as tmp:
+        tmp_path = Path(tmp.name)
+        while chunk := await file.read(1024 * 1024):
+            tmp.write(chunk)
+
+    try:
+        provider_client = _provider_for_printer(printer)
+        if provider_client is None:
+            raise HTTPException(502, "PrusaLink printer client is unavailable")
+
+        original_remote_path = remote_path
+        renamed = False
+        replaced = False
+        expected_size = tmp_path.stat().st_size
+        if _provider_file_exists(provider_client, remote_path, storage=storage):
+            if _provider_file_is_zero_placeholder(provider_client, remote_path, storage=storage):
+                raise HTTPException(409, f"Printer already has a 0-byte placeholder for {remote_path}.")
+            if conflict_strategy == "rename":
+                remote_path = _provider_renamed_upload_path(provider_client, remote_path, storage=storage)
+                renamed = True
+            elif conflict_strategy == "delete_replace":
+                _delete_existing_provider_file(provider_client, remote_path, storage=storage)
+                replaced = True
+            else:
+                raise HTTPException(409, f"File already exists on the printer: {remote_path}.")
+
+        reconciled = False
+        try:
+            success = provider_client.upload_file(tmp_path, remote_path, overwrite=overwrite, storage=storage)
+            if success:
+                success = await _wait_for_provider_file(provider_client, remote_path, expected_size, storage=storage)
+        except (httpx.TimeoutException, TimeoutError) as exc:
+            logger.warning(
+                "Firmware upload timed out after sending %s; reconciling printer storage: %s",
+                remote_path,
+                type(exc).__name__,
+            )
+            success = await _wait_for_provider_file(provider_client, remote_path, expected_size, storage=storage)
+            reconciled = success
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            raise HTTPException(
+                status_code if status_code in {400, 403, 404, 409} else 502,
+                f"Firmware upload failed: HTTP {status_code}",
+            ) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - return a safe provider failure to the caller
+            logger.exception("Firmware upload failed for %s: %s", remote_path, type(exc).__name__)
+            raise HTTPException(502, f"Firmware upload failed: {type(exc).__name__}") from exc
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+    if not success:
+        raise HTTPException(500, f"Failed to upload firmware file: {remote_path}")
+    response = {"status": "uploaded", "path": remote_path, "filename": Path(remote_path).name, "firmware": True}
+    if reconciled:
+        response["reconciled"] = True
+    if renamed:
+        response["renamed"] = True
+        response["original_filename"] = Path(original_remote_path).name
+    if replaced:
+        response["replaced"] = True
     return response
 
 

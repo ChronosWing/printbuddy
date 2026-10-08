@@ -288,6 +288,71 @@ async def test_start_printer_file_rejects_invalid_print_platform_type(async_clie
 
 @pytest.mark.asyncio
 @pytest.mark.integration
+async def test_upload_prusalink_firmware_file_delegates_to_provider_client(
+    async_client: AsyncClient,
+    printer_factory,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    printer = await printer_factory(provider="prusalink", model="Prusa CORE One")
+    fake_client = _FakeProviderClient()
+
+    from backend.app.api.routes import printers as printer_routes
+
+    monkeypatch.setattr(printer_routes, "_provider_for_printer", lambda _printer: fake_client)
+
+    response = await async_client.post(
+        f"/api/v1/printers/{printer.id}/files/firmware/upload",
+        params={"path": "/"},
+        files={"file": ("core-one-6.3.0.bbf", b"prusa firmware", "application/octet-stream")},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "uploaded",
+        "path": "/core-one-6.3.0.bbf",
+        "filename": "core-one-6.3.0.bbf",
+        "firmware": True,
+    }
+    assert fake_client.uploaded_paths == ["/core-one-6.3.0.bbf"]
+    assert fake_client.started_paths == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_upload_firmware_file_rejects_non_prusalink_provider(
+    async_client: AsyncClient,
+    printer_factory,
+):
+    printer = await printer_factory(provider="bambu", model="Bambu Lab P1S")
+
+    response = await async_client.post(
+        f"/api/v1/printers/{printer.id}/files/firmware/upload",
+        files={"file": ("core-one-6.3.0.bbf", b"prusa firmware", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Firmware upload is only supported for PrusaLink printers"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_upload_prusalink_firmware_file_rejects_non_bbf_extension(
+    async_client: AsyncClient,
+    printer_factory,
+):
+    printer = await printer_factory(provider="prusalink", model="Prusa CORE One")
+
+    response = await async_client.post(
+        f"/api/v1/printers/{printer.id}/files/firmware/upload",
+        files={"file": ("core-one-6.3.0.gcode", b"G28\n", "application/octet-stream")},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Unsupported firmware file type. Upload a .bbf file."
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
 async def test_upload_printer_file_delegates_to_provider_client(
     async_client: AsyncClient,
     printer_factory,

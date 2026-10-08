@@ -3990,6 +3990,31 @@ export const api = {
     }
     return response.json();
   },
+  uploadPrusaLinkFirmwareFile: async (
+    printerId: number,
+    file: File,
+    path = '/',
+    storage?: string | null
+  ): Promise<{ status: string; path: string; filename: string; firmware: true; reconciled?: boolean }> => {
+    const headers: Record<string, string> = {};
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    const params = new URLSearchParams({ path });
+    if (storage) params.set('storage', storage);
+    const response = await fetch(`${API_BASE}/printers/${printerId}/files/firmware/upload?${params.toString()}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  },
   startPrinterFile: (
     printerId: number,
     path: string,

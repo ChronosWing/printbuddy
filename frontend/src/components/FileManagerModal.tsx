@@ -292,6 +292,7 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
   const [selectedStorage, setSelectedStorage] = useState<string | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [uploadingFirmware, setUploadingFirmware] = useState(false);
   const [queueingFile, setQueueingFile] = useState(false);
   const [startingFile, setStartingFile] = useState(false);
   const [queuedLibraryFile, setQueuedLibraryFile] = useState<{ id: number; filename: string } | null>(null);
@@ -440,6 +441,8 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
     return lower.endsWith('.gcode') || lower.endsWith('.gco') || lower.endsWith('.g') || lower.endsWith('.bgcode') || lower.endsWith('.3mf') || lower.includes('.gcode.');
   };
 
+  const isPrusaFirmwareFile = (name: string) => isPrusaLinkPrinter && name.toLowerCase().endsWith('.bbf');
+
   const selectedPrintableFile = () => {
     if (selectedFiles.size !== 1) return null;
     const path = Array.from(selectedFiles)[0];
@@ -464,6 +467,25 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
       showToast(`Upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     } finally {
       setUploadingFile(false);
+    }
+  };
+
+  const handleFirmwareUpload = async (file: File | null | undefined) => {
+    if (!file) return;
+    if (!isPrusaFirmwareFile(file.name)) {
+      showToast('Unsupported firmware file. Select a .bbf firmware package.', 'error');
+      return;
+    }
+    setUploadingFirmware(true);
+    try {
+      await api.uploadPrusaLinkFirmwareFile(printerId, file, currentPath, activeStorage);
+      showToast(`Uploaded firmware ${file.name} to printer storage. Install it from the printer's firmware update screen.`);
+      queryClient.invalidateQueries({ queryKey: ['printerFiles', printerId] });
+      refetch();
+    } catch (error) {
+      showToast(`Firmware upload failed: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
+    } finally {
+      setUploadingFirmware(false);
     }
   };
 
@@ -653,13 +675,16 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
               ))}
             </select>
           </div>
-          <label className={`inline-flex items-center justify-center rounded-lg border border-bambu-dark-tertiary px-3 py-1.5 text-sm transition-colors ${uploadingFile ? 'opacity-60 cursor-wait' : 'cursor-pointer hover:border-bambu-green text-bambu-gray hover:text-white'}`}>
+          <label
+            aria-label="Upload printable file"
+            className={`inline-flex items-center justify-center rounded-lg border border-bambu-dark-tertiary px-3 py-1.5 text-sm transition-colors ${uploadingFile ? 'opacity-60 cursor-wait' : 'cursor-pointer hover:border-bambu-green text-bambu-gray hover:text-white'}`}
+          >
             {uploadingFile ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
             <input
               type="file"
               className="hidden"
               accept=".gcode,.gco,.g,.bgcode,.3mf"
-              disabled={uploadingFile}
+              disabled={uploadingFile || uploadingFirmware}
               onChange={(event) => {
                 const file = event.target.files?.[0];
                 event.currentTarget.value = '';
@@ -667,6 +692,26 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
               }}
             />
           </label>
+          {isPrusaLinkPrinter && (
+            <label
+              aria-label="Upload firmware (.bbf)"
+              title="Upload a Prusa firmware package to printer storage; install it from the printer's firmware update screen."
+              className={`inline-flex items-center justify-center rounded-lg border border-amber-500/50 px-3 py-1.5 text-sm transition-colors ${uploadingFirmware ? 'opacity-60 cursor-wait' : 'cursor-pointer hover:border-amber-400 text-amber-300 hover:text-amber-200'}`}
+            >
+              {uploadingFirmware ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              <input
+                type="file"
+                className="hidden"
+                accept=".bbf"
+                disabled={uploadingFirmware || uploadingFile}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.currentTarget.value = '';
+                  handleFirmwareUpload(file);
+                }}
+              />
+            </label>
+          )}
           <Button
             variant="secondary"
             size="sm"
