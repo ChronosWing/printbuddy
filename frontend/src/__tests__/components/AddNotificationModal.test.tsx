@@ -23,6 +23,7 @@ import type { NotificationProvider } from '../../api/client';
 afterEach(() => {
   server.resetHandlers();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function buildProvider(overrides: Partial<NotificationProvider> = {}): NotificationProvider {
@@ -289,6 +290,114 @@ describe('AddNotificationModal — ntfy Priority (#990)', () => {
 });
 
 describe('AddNotificationModal — Notify Live Activity display', () => {
+  it('renders a Notify provider when crypto.randomUUID is unavailable', () => {
+    vi.stubGlobal('crypto', {});
+
+    expect(() => render(
+      <AddNotificationModal
+        provider={buildProvider({ provider_type: 'notify', config: {} })}
+        onClose={() => undefined}
+      />,
+    )).not.toThrow();
+  });
+
+  it('enables Test configuration for Notify without optional Live Activity button fields', () => {
+    render(
+      <AddNotificationModal
+        provider={buildProvider({
+          provider_type: 'notify',
+          config: { device_id: 'DEVICE123', device_token: 'token', live_activities_enabled: 'false' },
+        })}
+        onClose={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole('button', { name: /test configuration/i })).not.toBeDisabled();
+  });
+
+  it('shows and saves button fields only when the Live Activity button checkbox is enabled', async () => {
+    let captured: unknown = null;
+    server.use(
+      http.patch('*/api/v1/notifications/1', async ({ request }) => {
+        captured = await request.json();
+        return HttpResponse.json({ id: 1 });
+      }),
+    );
+
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddNotificationModal
+        provider={buildProvider({
+          name: 'Notify iPhone',
+          provider_type: 'notify',
+          config: { device_id: 'DEVICE123', device_token: 'token', live_activities_enabled: 'true' },
+        })}
+        onClose={onClose}
+      />,
+    );
+
+    const buttonCheckbox = await screen.findByRole('checkbox', { name: /enable live activity button/i });
+    expect(screen.queryByLabelText(/live activity button title/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/live activity button url/i)).not.toBeInTheDocument();
+
+    await user.click(buttonCheckbox);
+    await user.type(screen.getByLabelText(/live activity button title/i), 'Pause');
+    await user.type(screen.getByLabelText(/live activity button url/i), 'https://octoprint.example.com/api/pause');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect((captured as { config: Record<string, unknown> }).config).toMatchObject({
+      live_activity_button_enabled: 'true',
+      live_activity_button_title: 'Pause',
+      live_activity_button_url: 'https://octoprint.example.com/api/pause',
+    });
+  });
+
+  it('rejects a Bamfleet Live Activity deep link', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddNotificationModal
+        provider={buildProvider({
+          provider_type: 'notify',
+          config: { device_id: 'DEVICE123', device_token: 'token', live_activities_enabled: 'true' },
+        })}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(await screen.findByRole('checkbox', { name: /enable live activity button/i }));
+    await user.type(screen.getByLabelText(/live activity button title/i), 'Open Bamfleet');
+    await user.type(screen.getByLabelText(/live activity button url/i), 'bamfleet://printers');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    expect(await screen.findByText(/button URL must use HTTPS/i)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unsupported Live Activity button URL scheme', async () => {
+    const onClose = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <AddNotificationModal
+        provider={buildProvider({
+          provider_type: 'notify',
+          config: { device_id: 'DEVICE123', device_token: 'token', live_activities_enabled: 'true' },
+        })}
+        onClose={onClose}
+      />,
+    );
+
+    await user.click(await screen.findByRole('checkbox', { name: /enable live activity button/i }));
+    await user.type(screen.getByLabelText(/live activity button title/i), 'Open Printbuddy');
+    await user.type(screen.getByLabelText(/live activity button url/i), 'http://10.17.1.96:8000/');
+    await user.click(screen.getByRole('button', { name: /^save$/i }));
+
+    expect(await screen.findByText(/button URL must use HTTPS/i)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
   it('renders and saves the Dynamic Island display mode for Notify providers', async () => {
     let captured: unknown = null;
     server.use(
@@ -330,11 +439,15 @@ describe('AddNotificationModal — Notify Live Activity display', () => {
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     const payload = captured as { config: Record<string, unknown> };
     expect(payload.config).toMatchObject({
-      device_id: 'DEVICE123',
-      device_token: 'token',
       live_activities_enabled: 'true',
       live_activity_compact_display: 'progress',
       live_activity_native_tile_countdown: 'true',
+      recipients: [{
+        id: 'legacy',
+        device_id: 'DEVICE123',
+        device_token: 'token',
+        live_activities_enabled: true,
+      }],
     });
   });
 });

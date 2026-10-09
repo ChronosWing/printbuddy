@@ -60,6 +60,7 @@ import { ModelViewerModal } from '../components/ModelViewerModal';
 import { SliceModal } from '../components/SliceModal';
 import { FileUploadModal } from '../components/FileUploadModal';
 import { PurgeOldFilesModal } from '../components/PurgeOldFilesModal';
+import { SourceSnapshotModal } from '../components/SourceSnapshotModal';
 import { useToast } from '../contexts/ToastContext';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { useAuth } from '../contexts/AuthContext';
@@ -709,6 +710,7 @@ interface FileCardProps {
   onPreview3d?: (file: LibraryFileListItem) => void;
   onRename?: (file: LibraryFileListItem) => void;
   onGenerateThumbnail?: (file: LibraryFileListItem) => void;
+  onSourceDetails?: (file: LibraryFileListItem) => void;
   thumbnailVersion?: number;
   hasPermission: (permission: Permission) => boolean;
   canModify: (resource: 'queue' | 'archives' | 'library', action: 'update' | 'delete' | 'reprint', createdById: number | null | undefined) => boolean;
@@ -716,7 +718,7 @@ interface FileCardProps {
   t: TFunction;
 }
 
-function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, onAddToQueue, onPrint, onSlice, useSlicerApi, onPreview3d, onRename, onGenerateThumbnail, thumbnailVersion, hasPermission, canModify, authEnabled, t }: FileCardProps) {
+function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, onAddToQueue, onPrint, onSlice, useSlicerApi, onPreview3d, onRename, onGenerateThumbnail, onSourceDetails, thumbnailVersion, hasPermission, canModify, authEnabled, t }: FileCardProps) {
   const [showActions, setShowActions] = useState(false);
 
   return (
@@ -739,14 +741,21 @@ function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, 
         ) : (
           <FileBox className="w-12 h-12 text-bambu-gray/30" />
         )}
-        {/* File type badge */}
-        <div className={`absolute top-2 right-2 text-xs px-1.5 py-0.5 rounded font-medium ${
-          file.file_type === '3mf' ? 'bg-bambu-green/90 text-white'
-          : file.file_type === 'gcode' ? 'bg-blue-500/90 text-white'
-          : file.file_type === 'stl' ? 'bg-purple-500/90 text-white'
-          : 'bg-bambu-gray/90 text-white'
-        }`}>
-          {file.file_type.toUpperCase()}
+        {/* File metadata badges */}
+        <div className="absolute top-2 right-2 flex items-center gap-1">
+          {file.filament_type && (
+            <div className="max-w-[110px] truncate bg-bambu-dark/90 text-white text-xs px-1.5 py-0.5 rounded font-medium" title={file.filament_type}>
+              {file.filament_type}
+            </div>
+          )}
+          <div className={`text-xs px-1.5 py-0.5 rounded font-medium ${
+            file.file_type === '3mf' ? 'bg-bambu-green/90 text-white'
+            : file.file_type === 'gcode' ? 'bg-blue-500/90 text-white'
+            : file.file_type === 'stl' ? 'bg-purple-500/90 text-white'
+            : 'bg-bambu-gray/90 text-white'
+          }`}>
+            {file.file_type.toUpperCase()}
+          </div>
         </div>
       </div>
 
@@ -788,6 +797,7 @@ function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, 
         <button
           onClick={() => setShowActions(!showActions)}
           className="p-1.5 rounded bg-bambu-dark-secondary/90 hover:bg-bambu-dark-tertiary"
+          aria-label={t('common.actions')}
         >
           <MoreVertical className="w-4 h-4 text-bambu-gray" />
         </button>
@@ -845,6 +855,23 @@ function FileCard({ file, isSelected, isMobile, onSelect, onDelete, onDownload, 
                 >
                   <Box className="w-3.5 h-3.5" />
                   3D Preview
+                </button>
+              )}
+              {file.source_snapshot_available && onSourceDetails && (
+                <button
+                  className={`w-full px-3 py-1.5 text-left text-sm flex items-center gap-2 ${
+                    hasPermission('library:read') ? 'text-white hover:bg-bambu-dark' : 'text-bambu-gray cursor-not-allowed'
+                  }`}
+                  onClick={() => {
+                    if (hasPermission('library:read')) {
+                      onSourceDetails(file);
+                      setShowActions(false);
+                    }
+                  }}
+                  disabled={!hasPermission('library:read')}
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  {t('fileManager.sourceDetails')}
                 </button>
               )}
               <button
@@ -941,6 +968,7 @@ export function FileManagerPage() {
   const [renameItem, setRenameItem] = useState<{ type: 'file' | 'folder'; id: number; name: string } | null>(null);
   const [thumbnailVersions, setThumbnailVersions] = useState<Record<number, number>>({});
   const [viewerFile, setViewerFile] = useState<LibraryFileListItem | null>(null);
+  const [sourceDetailsFile, setSourceDetailsFile] = useState<LibraryFileListItem | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>(() => {
     return (localStorage.getItem('library-view-mode') as 'grid' | 'list') || 'grid';
   });
@@ -1371,6 +1399,25 @@ export function FileManagerPage() {
     api.downloadLibraryFile(id).catch((err) => {
       console.error('Library file download failed:', err);
     });
+  };
+
+  const handleBulkDownload = async () => {
+    if (selectedFiles.length === 0) return;
+    try {
+      const blob = await api.downloadLibraryFilesAsZip(selectedFiles);
+      const url = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'library-files.zip';
+      document.body.appendChild(anchor);
+      anchor.click();
+      document.body.removeChild(anchor);
+      window.URL.revokeObjectURL(url);
+      showToast(t('fileManager.bulkDownloadComplete', { count: selectedFiles.length }), 'success');
+      handleDeselectAll();
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t('fileManager.bulkDownloadFailed'), 'error');
+    }
   };
 
   const handleDeleteConfirm = () => {
@@ -1878,6 +1925,16 @@ export function FileManagerPage() {
                     <Button
                       variant="secondary"
                       size="sm"
+                      onClick={handleBulkDownload}
+                      disabled={!hasPermission('library:read')}
+                      title={!hasPermission('library:read') ? t('fileManager.noPermissionDownload') : undefined}
+                    >
+                      <Download className="w-4 h-4 sm:mr-1" />
+                      <span className="hidden sm:inline">{t('fileManager.downloadSelected')}</span>
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
                       onClick={() => setShowMoveModal(true)}
                       disabled={!hasAnyPermission('library:update_own', 'library:update_all')}
                       title={!hasAnyPermission('library:update_own', 'library:update_all') ? t('fileManager.noPermissionMoveFiles') : undefined}
@@ -1991,6 +2048,7 @@ export function FileManagerPage() {
                     }}
                     onRename={(f) => setRenameItem({ type: 'file', id: f.id, name: f.filename })}
                     onGenerateThumbnail={(f) => singleThumbnailMutation.mutate(f.id)}
+                    onSourceDetails={setSourceDetailsFile}
                     thumbnailVersion={thumbnailVersions[file.id]}
                     hasPermission={hasPermission}
                     canModify={canModify}
@@ -2164,6 +2222,21 @@ export function FileManagerPage() {
                           disabled={!hasPermission('library:read')}
                         >
                           <Box className="w-4 h-4" />
+                        </button>
+                      )}
+                      {file.source_snapshot_available && (
+                        <button
+                          onClick={() => hasPermission('library:read') && setSourceDetailsFile(file)}
+                          className={`p-1.5 rounded transition-colors ${
+                            hasPermission('library:read')
+                              ? 'hover:bg-bambu-dark text-bambu-gray hover:text-bambu-green'
+                              : 'text-bambu-gray/50 cursor-not-allowed'
+                          }`}
+                          title={t('fileManager.sourceDetails')}
+                          aria-label={t('fileManager.sourceDetails')}
+                          disabled={!hasPermission('library:read')}
+                        >
+                          <Link2 className="w-4 h-4" />
                         </button>
                       )}
                       <button
@@ -2373,6 +2446,14 @@ export function FileManagerPage() {
                 }
               : undefined
           }
+        />
+      )}
+
+      {sourceDetailsFile && (
+        <SourceSnapshotModal
+          fileId={sourceDetailsFile.id}
+          fallbackTitle={sourceDetailsFile.print_name || sourceDetailsFile.filename}
+          onClose={() => setSourceDetailsFile(null)}
         />
       )}
 

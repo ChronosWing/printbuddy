@@ -289,6 +289,7 @@ export interface Printer {
   nozzle_count: number;  // 1 or 2, auto-detected from MQTT
   is_active: boolean;
   auto_archive: boolean;
+  reconnect_interval_seconds?: number;
   external_camera_url: string | null;
   external_camera_type: string | null;  // "mjpeg", "rtsp", "snapshot"
   external_camera_enabled: boolean;
@@ -510,6 +511,7 @@ export interface PrinterCreate {
   model?: string;
   location?: string;
   auto_archive?: boolean;
+  reconnect_interval_seconds?: number;
   external_camera_url?: string | null;
   external_camera_type?: string | null;
   external_camera_enabled?: boolean;
@@ -1100,6 +1102,7 @@ export interface AppSettings {
   // Filament tracking
   disable_filament_warnings: boolean;  // Disable filament warnings (print insufficiency and assignment mismatch)
   prefer_lowest_filament: boolean;  // When multiple spools match, prefer lowest remaining filament
+  warn_on_missing_spool_assignment: boolean;  // Confirm before starting without any assigned spool
   // Open Filament Database catalog lookup for local inventory spool creation
   open_filament_database_enabled: boolean;
   // Default printer
@@ -1140,6 +1143,9 @@ export interface AppSettings {
   // File Manager / Library settings
   library_archive_mode: 'always' | 'never' | 'ask';
   library_disk_warning_gb: number;
+  // MakerWorld import defaults
+  makerworld_archive_details_default: boolean;
+  makerworld_cover_thumbnail_default: boolean;
   // Camera view settings
   camera_view_mode: CameraViewMode;
   // Preferred slicer
@@ -1287,6 +1293,25 @@ export interface MakerworldImportResponse {
   folder_id: number | null;
   profile_id: number | null;
   was_existing: boolean;
+  source_archive: {
+    saved: boolean;
+    image_count: number;
+    warning: string | null;
+  } | null;
+}
+
+export interface LibrarySourceSnapshot {
+  schema_version: number;
+  source_type: string;
+  model_id: number;
+  profile_id: number | null;
+  title: string | null;
+  description_html: string;
+  creator: string | null;
+  license: string | null;
+  source_url: string;
+  captured_at: string;
+  images: Array<{ name: string; role: string; url: string }>;
 }
 
 export interface MakerworldRecentImport {
@@ -1385,7 +1410,7 @@ export interface BuiltinFilament {
 //   - Source-aware refs (`*_preset: PresetRef`) — new SliceModal that picks
 //     across cloud / local / standard tiers. Source-aware refs win when both
 //     are present in the same payload.
-export type PresetSource = 'cloud' | 'local' | 'standard';
+export type PresetSource = 'orca_cloud' | 'cloud' | 'local' | 'standard';
 export interface PresetRef {
   source: PresetSource;
   id: string;
@@ -1464,11 +1489,26 @@ export interface UnifiedPresetsBySlot {
   filament: UnifiedPreset[];
 }
 export interface UnifiedPresetsResponse {
+  orca_cloud: UnifiedPresetsBySlot;
   cloud: UnifiedPresetsBySlot;
   local: UnifiedPresetsBySlot;
   standard: UnifiedPresetsBySlot;
   cloud_status: SlicerCloudStatus;
+  orca_cloud_status: SlicerCloudStatus;
 }
+
+export interface OrcaDeviceStartResponse {
+  user_code: string;
+  verification_uri: string;
+  verification_uri_complete: string;
+  interval: number;
+  expires_in: number;
+}
+export type OrcaDevicePollStatus = 'authorization_pending' | 'slow_down' | 'access_denied' | 'expired_token' | 'complete';
+export interface OrcaDevicePollResponse { status: OrcaDevicePollStatus; connected: boolean; email: string | null; user_id: string | null; }
+export interface OrcaAuthStatusResponse { connected: boolean; email: string | null; user_id: string | null; }
+export interface OrcaProfileMeta { setting_id: string; name: string; type: string; version: string | null; user_id: string | null; updated_time: string | null; is_custom: boolean; }
+export interface OrcaProfileListResponse { filament: OrcaProfileMeta[]; printer: OrcaProfileMeta[]; process: OrcaProfileMeta[]; }
 
 export interface SliceResponse {
   library_file_id: number;
@@ -3055,7 +3095,7 @@ export type Permission =
   | 'system:read'
   | 'settings:read' | 'settings:update' | 'settings:backup' | 'settings:restore'
   | 'github:backup' | 'github:restore'
-  | 'cloud:auth'
+  | 'cloud:auth' | 'orca_cloud:auth'
   | 'makerworld:view' | 'makerworld:import'
   | 'api_keys:read' | 'api_keys:create' | 'api_keys:update' | 'api_keys:delete'
   | 'users:read' | 'users:create' | 'users:update' | 'users:delete'
@@ -3950,6 +3990,31 @@ export const api = {
     }
     return response.json();
   },
+  uploadPrusaLinkFirmwareFile: async (
+    printerId: number,
+    file: File,
+    path = '/',
+    storage?: string | null
+  ): Promise<{ status: string; path: string; filename: string; firmware: true; reconciled?: boolean }> => {
+    const headers: Record<string, string> = {};
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    const params = new URLSearchParams({ path });
+    if (storage) params.set('storage', storage);
+    const response = await fetch(`${API_BASE}/printers/${printerId}/files/firmware/upload?${params.toString()}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    return response.json();
+  },
   startPrinterFile: (
     printerId: number,
     path: string,
@@ -4740,6 +4805,14 @@ export const api = {
     }),
   cloudLogout: () =>
     request<{ success: boolean }>('/cloud/logout', { method: 'POST' }),
+
+  // Orca Cloud: official RFC 8628 device authorization, read-only sync:read.
+  orcaCloudDeviceStart: () => request<OrcaDeviceStartResponse>('/orca-cloud/device/start', { method: 'POST' }),
+  orcaCloudDevicePoll: () => request<OrcaDevicePollResponse>('/orca-cloud/device/poll', { method: 'POST' }),
+  orcaCloudStatus: () => request<OrcaAuthStatusResponse>('/orca-cloud/status'),
+  orcaCloudLogout: () => request<{ success: boolean }>('/orca-cloud/logout', { method: 'POST' }),
+  orcaCloudListProfiles: () => request<OrcaProfileListResponse>('/orca-cloud/profiles'),
+
   getCloudSettings: (version = '02.04.00.70') =>
     request<SlicerSettingsResponse>(`/cloud/settings?version=${version}`),
   getBuiltinFilaments: () =>
@@ -4762,6 +4835,9 @@ export const api = {
     instance_id: number | null,
     profile_id?: number | null,
     folder_id?: number | null,
+    archive_details = false,
+    archive_image_count = 1,
+    use_cover_as_thumbnail = false,
   ) =>
     request<MakerworldImportResponse>('/makerworld/import', {
       method: 'POST',
@@ -4770,6 +4846,9 @@ export const api = {
         instance_id: instance_id ?? null,
         profile_id: profile_id ?? null,
         folder_id: folder_id ?? null,
+        archive_details,
+        archive_image_count,
+        use_cover_as_thumbnail,
       }),
     }),
   getCloudSettingDetail: (settingId: string) =>
@@ -5902,6 +5981,10 @@ export const api = {
     return request<LibraryFileListItem[]>(`/library/files?${params}`);
   },
   getLibraryFile: (id: number) => request<LibraryFile>(`/library/files/${id}`),
+  getLibrarySourceSnapshot: (id: number) =>
+    request<LibrarySourceSnapshot>(`/library/files/${id}/source-snapshot`),
+  getLibrarySourceAssetUrl: (id: number, name: string) =>
+    withStreamToken(`${API_BASE}/library/files/${id}/source-assets/${encodeURIComponent(name)}`),
   uploadLibraryFile: async (
     file: File,
     folderId?: number | null,
@@ -6016,6 +6099,22 @@ export const api = {
     a.click();
     document.body.removeChild(a);
     window.URL.revokeObjectURL(url);
+  },
+  downloadLibraryFilesAsZip: async (fileIds: number[]): Promise<Blob> => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+    const response = await fetch(`${API_BASE}/library/files/download-zip`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ file_ids: fileIds }),
+    });
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new Error(error.detail || `HTTP ${response.status}`);
+    }
+    return response.blob();
   },
   getLibraryFileThumbnailUrl: (id: number) => withStreamToken(`${API_BASE}/library/files/${id}/thumbnail`),
   getLibraryFilePlateThumbnail: (id: number, plateIndex: number) =>
@@ -6504,6 +6603,9 @@ export interface LibraryFile {
   print_count: number;
   last_printed_at: string | null;
   notes: string | null;
+  source_type: string | null;
+  source_url: string | null;
+  source_snapshot_available: boolean;
   duplicates: LibraryFileDuplicate[] | null;
   duplicate_count: number;
   // User tracking (Issue #206)
@@ -6515,6 +6617,7 @@ export interface LibraryFile {
   print_name: string | null;
   print_time_seconds: number | null;
   filament_used_grams: number | null;
+  filament_type: string | null;
   sliced_for_model: string | null;
 }
 
@@ -6526,6 +6629,8 @@ export interface LibraryFileListItem {
   file_type: string;
   file_size: number;
   thumbnail_path: string | null;
+  source_type?: string | null;
+  source_snapshot_available?: boolean;
   print_count: number;
   duplicate_count: number;
   // User tracking (Issue #206)
@@ -6535,6 +6640,7 @@ export interface LibraryFileListItem {
   print_name: string | null;
   print_time_seconds: number | null;
   filament_used_grams: number | null;
+  filament_type: string | null;
   sliced_for_model: string | null;
 }
 

@@ -1838,6 +1838,23 @@ async def run_migrations(conn):
     await _safe_execute(conn, "ALTER TABLE users ADD COLUMN cloud_email VARCHAR(255)")
     await _safe_execute(conn, "ALTER TABLE users ADD COLUMN cloud_region VARCHAR(10)")
 
+    # Migration: per-user Orca Cloud external-app credentials and transient
+    # RFC 8628 device-code pairing state. OAuth tokens are never logged.
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_token VARCHAR(2000)")
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_refresh_token VARCHAR(128)")
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_expires_at DATETIME")
+    else:
+        await _safe_execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS orca_cloud_expires_at TIMESTAMP")
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_email VARCHAR(255)")
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_user_id VARCHAR(64)")
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_pending_verifier VARCHAR(128)")
+    await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_pending_state VARCHAR(32)")
+    if is_sqlite():
+        await _safe_execute(conn, "ALTER TABLE users ADD COLUMN orca_cloud_pending_at DATETIME")
+    else:
+        await _safe_execute(conn, "ALTER TABLE users ADD COLUMN IF NOT EXISTS orca_cloud_pending_at TIMESTAMP")
+
     # Cleanup: Remove obsolete settings keys that are no longer used
     obsolete_keys = ["slicer_binary_path"]
     for key in obsolete_keys:
@@ -1880,6 +1897,9 @@ async def run_migrations(conn):
 
     # Migration: Add awaiting_plate_clear column to printers (#961)
     await _safe_execute(conn, "ALTER TABLE printers ADD COLUMN awaiting_plate_clear BOOLEAN DEFAULT FALSE NOT NULL")
+
+    # Migration: Configure backend recovery for active offline printers.
+    await _safe_execute(conn, "ALTER TABLE printers ADD COLUMN reconnect_interval_seconds INTEGER DEFAULT 30 NOT NULL")
 
     # Migration: Add REST/Webhook smart plug fields
     await _safe_execute(conn, "ALTER TABLE smart_plugs ADD COLUMN rest_on_url VARCHAR(500)")
@@ -2185,6 +2205,7 @@ async def run_migrations(conn):
     # as the library grows.
     await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN source_type VARCHAR(32)")
     await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN source_url VARCHAR(512)")
+    await _safe_execute(conn, "ALTER TABLE library_files ADD COLUMN source_snapshot_path VARCHAR(500)")
     await _safe_execute(
         conn,
         "CREATE INDEX IF NOT EXISTS ix_library_files_source_url ON library_files(source_url)",
@@ -2549,6 +2570,24 @@ async def run_migrations(conn):
             "ALTER TABLE filament_shopping_list ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'pending'",
         )
         await _safe_execute(conn, "ALTER TABLE filament_shopping_list ADD COLUMN IF NOT EXISTS purchased_at TIMESTAMP")
+
+    # Migration: Persist Notify Live Activity recipient identity. Existing rows
+    # belong to the backwards-compatible single-device recipient named legacy.
+    if is_sqlite():
+        await _safe_execute(
+            conn,
+            "ALTER TABLE notification_live_activities ADD COLUMN recipient_id VARCHAR(128) NOT NULL DEFAULT 'legacy'",
+        )
+    else:
+        await _safe_execute(
+            conn,
+            "ALTER TABLE notification_live_activities ADD COLUMN IF NOT EXISTS recipient_id VARCHAR(128) NOT NULL DEFAULT 'legacy'",
+        )
+    await _safe_execute(
+        conn,
+        "CREATE INDEX IF NOT EXISTS ix_notify_live_provider_recipient_printer_state "
+        "ON notification_live_activities (provider_id, recipient_id, printer_id, state)",
+    )
 
     # Migration: Add inventory stock alert columns to notification_providers.
     # Postgres rejects `DEFAULT 0` for BOOLEAN columns.

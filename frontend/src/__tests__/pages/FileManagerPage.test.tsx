@@ -165,6 +165,67 @@ describe('FileManagerPage', () => {
       });
     });
 
+    it('renders material metadata as a card badge', async () => {
+      server.use(
+        http.get('/api/v1/library/files', () =>
+          HttpResponse.json([{ ...mockFiles[0], filename: 'pla-test.gcode', file_type: 'gcode', filament_type: 'PLA' }]),
+        ),
+      );
+
+      render(<FileManagerPage />);
+
+      const materialBadge = await screen.findByText('PLA');
+      expect(materialBadge.parentElement).toHaveClass('right-2');
+    });
+
+    it('opens archived MakerWorld source details and sanitises the saved description', async () => {
+      server.use(
+        http.get('/api/v1/library/files', () =>
+          HttpResponse.json([
+            {
+              ...mockFiles[0],
+              source_type: 'makerworld',
+              source_snapshot_available: true,
+            },
+          ]),
+        ),
+        http.get('/api/v1/library/files/1/source-snapshot', () =>
+          HttpResponse.json({
+            schema_version: 1,
+            source_type: 'makerworld',
+            model_id: 26,
+            profile_id: 2601,
+            title: 'Archived model',
+            description_html: '<p>Saved instructions</p><script>window.__sourcePwned = true;</script>',
+            creator: 'Maker',
+            license: 'Standard',
+            source_url: 'https://makerworld.com/models/26#profileId-2601',
+            captured_at: '2026-09-10T09:00:00+00:00',
+            images: [
+              {
+                name: 'cover.png',
+                role: 'cover',
+                url: '/api/v1/library/files/1/source-assets/cover.png',
+              },
+            ],
+          }),
+        ),
+      );
+
+      render(<FileManagerPage />);
+      await userEvent.click(await screen.findByRole('button', { name: 'Actions' }));
+      await userEvent.click(await screen.findByRole('button', { name: /Source details/i }));
+
+      expect(await screen.findByRole('heading', { name: 'Archived model' })).toBeInTheDocument();
+      expect(screen.getByText('Saved instructions')).toBeInTheDocument();
+      expect((window as unknown as { __sourcePwned?: boolean }).__sourcePwned).toBeUndefined();
+      expect(document.body.innerHTML).not.toContain('__sourcePwned');
+      expect(screen.getByRole('img', { name: /Archived model/i })).toHaveAttribute(
+        'src',
+        expect.stringContaining('/api/v1/library/files/1/source-assets/cover.png'),
+      );
+    });
+
     it('shows New Folder button', async () => {
       render(<FileManagerPage />);
 
@@ -408,6 +469,38 @@ describe('FileManagerPage', () => {
       await waitFor(() => {
         expect(screen.getByText('Move')).toBeInTheDocument();
         expect(screen.getByText('Delete')).toBeInTheDocument();
+      });
+    });
+
+    it('downloads all selected files as a ZIP archive', async () => {
+      const user = userEvent.setup();
+      let requestedFileIds: number[] | null = null;
+      Object.defineProperty(window.URL, 'createObjectURL', {
+        value: vi.fn(() => 'blob:library-files'),
+        configurable: true,
+      });
+      Object.defineProperty(window.URL, 'revokeObjectURL', {
+        value: vi.fn(),
+        configurable: true,
+      });
+      server.use(
+        http.post('/api/v1/library/files/download-zip', async ({ request }) => {
+          requestedFileIds = (await request.json() as { file_ids: number[] }).file_ids;
+          return new HttpResponse(new Blob(['zip archive']), {
+            headers: {
+              'Content-Type': 'application/zip',
+              'Content-Disposition': 'attachment; filename="library-files.zip"',
+            },
+          });
+        }),
+      );
+
+      render(<FileManagerPage />);
+      await user.click(await screen.findByText('Select All'));
+      await user.click(await screen.findByRole('button', { name: 'Download selected' }));
+
+      await waitFor(() => {
+        expect(requestedFileIds).toEqual([1, 2, 3]);
       });
     });
   });

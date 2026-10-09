@@ -60,6 +60,9 @@ describe('FileManagerModal', () => {
       }),
       http.delete('/api/v1/printers/:id/files', () => {
         return HttpResponse.json({ success: true });
+      }),
+      http.get('/api/v1/inventory/assignments', () => {
+        return HttpResponse.json([{ id: 1, printer_id: 1, spool_id: 1, ams_id: -1, tray_id: 0 }]);
       })
     );
   });
@@ -349,6 +352,27 @@ describe('FileManagerModal', () => {
       });
     });
 
+    it('requires confirmation before starting when the printer has no assigned spool', async () => {
+      let startedPath: string | null = null;
+      server.use(
+        http.get('/api/v1/settings/', () => HttpResponse.json({ warn_on_missing_spool_assignment: true })),
+        http.get('/api/v1/inventory/assignments', () => HttpResponse.json([])),
+        http.post('/api/v1/printers/:id/files/start', ({ request }) => {
+          startedPath = new URL(request.url).searchParams.get('path');
+          return HttpResponse.json({ status: 'started', path: startedPath });
+        }),
+      );
+
+      render(<FileManagerModal printerId={1} printerName="Prusa CORE One" onClose={mockOnClose} />);
+      expect(await screen.findByText('print_job.gcode')).toBeInTheDocument();
+      fireEvent.click(screen.getAllByRole('button').filter(btn => btn.querySelector('svg')?.classList.contains('lucide-square'))[1]);
+      fireEvent.click(screen.getByRole('button', { name: /^Print$/i }));
+
+      expect(await screen.findByRole('heading', { name: 'No spool assigned' })).toBeInTheDocument();
+      expect(startedPath).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Start Print Anyway' }));
+      await waitFor(() => expect(startedPath).toBe('/print_job.gcode'));
+    });
 
     it('passes the selected PrusaLink storage when listing and starting a file', async () => {
       const seenListStorages: Array<string | null> = [];
@@ -458,6 +482,47 @@ describe('FileManagerModal', () => {
         expect(params?.get('bed_levelling')).toBe('true');
         expect(params?.get('print_platform_type')).toBe('1');
       });
+    });
+  });
+
+  describe('firmware files', () => {
+    it('shows a dedicated firmware upload action for PrusaLink and keeps firmware files out of Print', async () => {
+      const firmwareFile = { name: 'core-one-6.3.0.bbf', path: '/core-one-6.3.0.bbf', size: 1234, is_directory: false, mtime: '2024-01-13T10:00:00Z' };
+      mockFiles.push(firmwareFile);
+
+      try {
+        render(
+          <FileManagerModal
+            printerId={1}
+            printerName="Prusa CORE One"
+            printerProvider="prusalink"
+            onClose={mockOnClose}
+          />
+        );
+
+        expect(await screen.findByText('core-one-6.3.0.bbf')).toBeInTheDocument();
+        const firmwareUpload = screen.getByLabelText('Upload firmware (.bbf)');
+        expect(firmwareUpload).toBeInTheDocument();
+        expect(firmwareUpload.querySelector('input[type="file"]')).toHaveAttribute('accept', '.bbf');
+
+        const checkbox = screen.getAllByRole('button').find((button) =>
+          button.querySelector('svg')?.classList.contains('lucide-square')
+          && button.parentElement?.textContent?.includes('core-one-6.3.0.bbf')
+        );
+        expect(checkbox).toBeTruthy();
+        fireEvent.click(checkbox!);
+
+        expect(screen.getByRole('button', { name: /^Print$/i })).toBeDisabled();
+        expect(screen.queryByRole('button', { name: /Add to Queue/i })).not.toBeInTheDocument();
+      } finally {
+        mockFiles.pop();
+      }
+    });
+
+    it('does not show the firmware upload action for non-PrusaLink printers', async () => {
+      render(<FileManagerModal printerId={1} printerName="X1 Carbon" printerProvider="bambu" onClose={mockOnClose} />);
+
+      expect(screen.queryByLabelText('Upload firmware (.bbf)')).not.toBeInTheDocument();
     });
   });
 

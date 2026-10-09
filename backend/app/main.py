@@ -47,6 +47,7 @@ from backend.app.api.routes import (
     notifications,
     obico,
     open_filament_database,
+    orca_cloud,
     pending_uploads,
     print_log,
     print_queue,
@@ -96,7 +97,7 @@ from backend.app.services.mqtt_smart_plug import mqtt_smart_plug_service
 from backend.app.services.notification_service import notification_service
 from backend.app.services.notify_live_activity_service import notify_live_activity_service
 from backend.app.services.obico_detection import obico_detection_service
-from backend.app.services.print_progress import effective_print_progress
+from backend.app.services.print_progress import effective_print_progress, live_activity_progress
 from backend.app.services.print_scheduler import scheduler as print_scheduler
 from backend.app.services.printer_manager import (
     init_printer_connections,
@@ -343,6 +344,14 @@ _active_prints: dict[tuple[int, str], int] = {}
 # {(printer_id, filename): archive_id}
 _expected_prints: dict[tuple[int, str], int] = {}
 
+# First observation of a tag-less/manual spool assignment that appears missing
+# or mismatched in AMS telemetry. Bambu startup publishes partial and stale AMS
+# snapshots, so an individual observation must never delete persistent user
+# inventory state. The value is the observed fault fingerprint; a later callback
+# must report the same fault before cleanup can remove the assignment.
+# {(printer_id, assignment_id): "missing" | "mismatch:<color>:<type>"}
+_manual_assignment_cleanup_observations: dict[tuple[int, int], str] = {}
+
 # Track AMS mapping for prints: {archive_id: [global_tray_id_per_slot]}
 # Used by usage tracker to map 3MF slots to physical AMS trays
 _print_ams_mappings: dict[int, list[int]] = {}
@@ -364,6 +373,10 @@ PRINT_ALMOST_DONE_PROGRESS_THRESHOLD = 97
 
 # Track whether the almost-done notification has been sent for current print
 _print_almost_done_notified: dict[int, bool] = {}
+# Track the last UI-aligned progress sample for the current print. Almost-done
+# is a threshold-crossing event; a new job's first sample may still contain
+# stale final progress/layer data from the previous print.
+_print_almost_done_last_progress: dict[int, float] = {}
 
 # Track whether first layer complete notification has been sent for current print
 _first_layer_notified: dict[int, bool] = {}
@@ -1232,6 +1245,7 @@ def _reset_progress_notification_tracking(printer_id: int, *, clear_job_key: boo
     _last_progress_milestone[printer_id] = 0
     _pending_progress_milestone.pop(printer_id, None)
     _last_progress_value.pop(printer_id, None)
+    _print_almost_done_last_progress.pop(printer_id, None)
     if clear_job_key:
         _progress_job_key.pop(printer_id, None)
 
@@ -1242,6 +1256,18 @@ def _provider_name_for_progress(printer_id: int) -> str:
         return str(getattr(printer, "provider", None) or "bambu").strip().lower()
     except Exception:
         return ""
+
+
+def _should_send_print_almost_done(printer_id: int, progress: float) -> bool:
+    """Return whether this print just crossed the almost-done threshold."""
+
+    previous_progress = _print_almost_done_last_progress.get(printer_id)
+    _print_almost_done_last_progress[printer_id] = progress
+    return (
+        previous_progress is not None
+        and previous_progress < PRINT_ALMOST_DONE_PROGRESS_THRESHOLD <= progress
+        and not _print_almost_done_notified.get(printer_id, False)
+    )
 
 
 def _should_send_progress_milestone(
@@ -1376,6 +1402,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
     logger = logging.getLogger(__name__)
     raw_progress = state.progress or 0
     progress = effective_print_progress(state)
+    activity_progress = live_activity_progress(state)
     is_printing = bool(state.connected) and state.state in ("RUNNING", "PRINTING")
     provider = _provider_name_for_progress(printer_id)
 
@@ -1412,7 +1439,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
                     printer_id=printer_id,
                     printer_name=printer_name,
                     filename=filename,
-                    progress=progress,
+                    progress=activity_progress,
                     remaining_time=remaining_time_seconds,
                     subtask_id=state.subtask_id,
                     layer_num=state.layer_num,
@@ -1423,11 +1450,11 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
 
         if progress < 5:
             # Reset milestone tracking at the beginning of a print even while the
-            # printer is already in RUNNING/PRINTING. The old elif branch never
-            # executed for early active prints because is_printing/progress>0 won.
+            # printer is already in RUNNING/PRINTING. Keep the almost-done sent
+            # flag until the job changes or becomes inactive so a transient
+            # same-job progress regression cannot send a duplicate.
             _last_progress_milestone[printer_id] = 0
             _pending_progress_milestone.pop(printer_id, None)
-            _print_almost_done_notified[printer_id] = False
             _first_layer_notified[printer_id] = False
 
         if progress > 0:
@@ -1494,7 +1521,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
 
             _last_progress_value[printer_id] = progress
 
-        if progress >= PRINT_ALMOST_DONE_PROGRESS_THRESHOLD and not _print_almost_done_notified.get(printer_id, False):
+        if _should_send_print_almost_done(printer_id, activity_progress):
             _print_almost_done_notified[printer_id] = True
             try:
                 async with async_session() as db:
@@ -1646,6 +1673,30 @@ def _is_bambu_uuid(tray_uuid: str) -> bool:
     return bool(tray_uuid) and tray_uuid not in ("", "0" * len(tray_uuid))
 
 
+def _manual_assignment_cleanup_key(printer_id: int, assignment_id: int) -> tuple[int, int]:
+    """Return the process-local key for a pending tag-less assignment cleanup."""
+    return printer_id, assignment_id
+
+
+def _clear_manual_assignment_cleanup_observation(printer_id: int, assignment_id: int) -> None:
+    """Forget a pending cleanup after a slot reports healthy/trustworthy state."""
+    _manual_assignment_cleanup_observations.pop(_manual_assignment_cleanup_key(printer_id, assignment_id), None)
+
+
+def _confirm_manual_assignment_cleanup(printer_id: int, assignment_id: int, fault: str) -> bool:
+    """Require the same tag-less AMS fault in two callbacks before unlinking.
+
+    Bambu sends partial/stale AMS telemetry during printer startup. A single
+    callback therefore cannot safely be treated as an inventory replacement.
+    """
+    key = _manual_assignment_cleanup_key(printer_id, assignment_id)
+    if _manual_assignment_cleanup_observations.get(key) == fault:
+        _manual_assignment_cleanup_observations.pop(key, None)
+        return True
+    _manual_assignment_cleanup_observations[key] = fault
+    return False
+
+
 async def on_ams_change(printer_id: int, ams_data: list):
     """Handle AMS data changes - sync to Spoolman if enabled and auto mode."""
     logger = logging.getLogger(__name__)
@@ -1712,6 +1763,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                     current_tray = _find_tray_in_ams_data(ams_data, assignment.ams_id, assignment.tray_id)
                 if not current_tray:
                     if _print_active:
+                        _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                         logger.info(
                             "Auto-unlink: keeping spool %d AMS%d-T%d — tray missing during active print",
                             assignment.spool_id,
@@ -1719,13 +1771,21 @@ async def on_ams_change(printer_id: int, ams_data: list):
                             assignment.tray_id,
                         )
                         continue
+                    if not _confirm_manual_assignment_cleanup(printer_id, assignment.id, "missing"):
+                        logger.info(
+                            "Auto-unlink: keeping spool %d AMS%d-T%d — tray missing in first AMS callback; awaiting confirmation",
+                            assignment.spool_id,
+                            assignment.ams_id,
+                            assignment.tray_id,
+                        )
+                        continue
                     logger.info(
-                        "Auto-unlink: spool %d AMS%d-T%d — tray not found in AMS data (slot empty?)",
+                        "Auto-unlink: spool %d AMS%d-T%d — tray absent in two AMS callbacks",
                         assignment.spool_id,
                         assignment.ams_id,
                         assignment.tray_id,
                     )
-                    stale.append(assignment)  # Slot empty
+                    stale.append(assignment)  # Confirmed empty slot
                 elif _is_bambu_uuid(current_tray.get("tray_uuid", "")):
                     # A Bambu Lab spool is in this slot — check if it's the same spool
                     # that's currently assigned. If yes, keep the assignment (avoids
@@ -1744,6 +1804,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                         ):
                             spool_matches = True
                     if spool_matches:
+                        _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                         # Same BL spool still in slot — keep assignment, update fingerprint if needed
                         cur_color = current_tray.get("tray_color", "")
                         cur_type = current_tray.get("tray_type", "")
@@ -1760,6 +1821,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                             )
                         continue
                     # Different BL spool or unrecognized — unlink so auto-assign can match.
+                    _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                     # Do not delete during an active print: print-start AMS telemetry can
                     # be noisy, while the user's assignment is persistent inventory state.
                     if _print_active:
@@ -1789,6 +1851,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                     metadata_blank = not cur_type.strip() and cur_color_normalized in ("", "00000000")
 
                     if metadata_blank:
+                        _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                         logger.info(
                             "Auto-unlink: keeping spool %d AMS%d-T%d — live tray metadata is blank/transient",
                             assignment.spool_id,
@@ -1815,6 +1878,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                     # tray_type that might survive the relay's auto-clearing.
                     loaded = cur_state == 11 or (cur_state not in (9, 10) and cur_type.strip())
                     if not fp_type.strip() and loaded and assignment.spool:
+                        _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                         try:
                             from backend.app.api.routes.inventory import (
                                 apply_spool_to_slot_via_mqtt,
@@ -1857,6 +1921,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                             spool_color = (spool.rgba or "FFFFFFFF").upper()
                             spool_type = (spool.material or "").upper()
                             if _colors_similar(cur_color, spool_color) and cur_type.upper() == spool_type:
+                                _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                                 logger.info(
                                     "Auto-unlink: spool %d AMS%d-T%d — fingerprint mismatch but tray matches spool, updating fp",
                                     assignment.spool_id,
@@ -1879,6 +1944,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                             spool.material if spool else "?",
                         )
                         if _print_active:
+                            _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
                             logger.info(
                                 "Auto-unlink: keeping spool %d AMS%d-T%d — fingerprint mismatch during active print",
                                 assignment.spool_id,
@@ -1886,7 +1952,18 @@ async def on_ams_change(printer_id: int, ams_data: list):
                                 assignment.tray_id,
                             )
                             continue
-                        stale.append(assignment)  # Spool changed
+                        mismatch_fault = f"mismatch:{cur_color_normalized}:{cur_type.strip().upper()}"
+                        if not _confirm_manual_assignment_cleanup(printer_id, assignment.id, mismatch_fault):
+                            logger.info(
+                                "Auto-unlink: keeping spool %d AMS%d-T%d — first tag-less fingerprint mismatch; awaiting confirmation",
+                                assignment.spool_id,
+                                assignment.ams_id,
+                                assignment.tray_id,
+                            )
+                            continue
+                        stale.append(assignment)  # Confirmed spool change
+                    else:
+                        _clear_manual_assignment_cleanup_observation(printer_id, assignment.id)
             for a in stale:
                 await db.delete(a)
             if stale:
@@ -5658,9 +5735,13 @@ async def lifespan(app: FastAPI):
     from backend.app.services.makerworld import (
         set_shared_http_client as set_shared_makerworld_http_client,
     )
+    from backend.app.services.orca_cloud import (
+        set_shared_http_client as set_shared_orca_http_client,
+    )
 
     _shared_cloud_http_client = _httpx.AsyncClient(timeout=30.0)
     set_shared_http_client(_shared_cloud_http_client)
+    set_shared_orca_http_client(_shared_cloud_http_client)
     # Reuse the same connection pool for MakerWorld — different host, same
     # keep-alive pool saves a TLS handshake per request.
     set_shared_makerworld_http_client(_shared_cloud_http_client)
@@ -5973,8 +6054,9 @@ async def lifespan(app: FastAPI):
 
     await mqtt_relay.disconnect(timeout=2)
 
-    # Drop the shared Bambu Cloud HTTP client we registered at startup.
+    # Drop shared cloud HTTP clients registered at startup.
     set_shared_http_client(None)
+    set_shared_orca_http_client(None)
     set_shared_makerworld_http_client(None)
     await _shared_cloud_http_client.aclose()
 
@@ -6396,6 +6478,7 @@ app.include_router(inventory.router, prefix=app_settings.api_prefix)
 app.include_router(labels.router, prefix=app_settings.api_prefix)
 app.include_router(settings_routes.router, prefix=app_settings.api_prefix)
 app.include_router(cloud.router, prefix=app_settings.api_prefix)
+app.include_router(orca_cloud.router, prefix=app_settings.api_prefix)
 app.include_router(local_presets.router, prefix=app_settings.api_prefix)
 app.include_router(smart_plugs.router, prefix=app_settings.api_prefix)
 app.include_router(print_log.router, prefix=app_settings.api_prefix)

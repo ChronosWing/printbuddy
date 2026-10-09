@@ -564,8 +564,34 @@ class VirtualPrinterFTPServer:
         self._running = False
         self._ssl_context: ssl.SSLContext | None = None
         self._active_sessions: list[asyncio.Task] = []
+        # Post-upload work must not hold the FTP control session open: Bambu
+        # Studio sends MQTT project_file after FTP QUIT and queue mode waits for
+        # that message to inherit slicer options (#31).
+        self._file_callback_tasks: set[asyncio.Task] = set()
         # Override PASV response IP for Docker bridge mode / NAT environments
         self._pasv_address = os.environ.get("VIRTUAL_PRINTER_PASV_ADDRESS", "")
+
+    def _schedule_file_received(self, file_path: Path, source_ip: str) -> None:
+        """Run post-upload handling independently from the FTP control session."""
+        if self.on_file_received is None:
+            return
+        task = asyncio.create_task(
+            self._run_file_received_callback(file_path, source_ip),
+            name=f"vp-ftp-upload-{file_path.name}",
+        )
+        self._file_callback_tasks.add(task)
+        task.add_done_callback(self._file_callback_tasks.discard)
+
+    async def _run_file_received_callback(self, file_path: Path, source_ip: str) -> None:
+        """Await and log the application callback without leaking task errors."""
+        try:
+            result = self.on_file_received(file_path, source_ip) if self.on_file_received else None
+            if asyncio.iscoroutine(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Post-upload callback error for %s", file_path.name)
 
     async def start(self) -> None:
         """Start the implicit FTPS server."""
@@ -638,7 +664,7 @@ class VirtualPrinterFTPServer:
             upload_dir=self.upload_dir,
             access_code=self.access_code,
             ssl_context=self._ssl_context,
-            on_file_received=self.on_file_received,
+            on_file_received=self._schedule_file_received,
             passive_port_range=(self.PASSIVE_PORT_MIN, self.PASSIVE_PORT_MAX),
             pasv_address=self._pasv_address,
             bind_address=self.bind_address,
@@ -669,6 +695,16 @@ class VirtualPrinterFTPServer:
             await asyncio.sleep(0.1)
 
         self._active_sessions.clear()
+
+        # Queue/archive callbacks may still be waiting for MQTT metadata. Stop
+        # them deterministically so a disabled VP cannot mutate state after its
+        # FTP listener has gone away.
+        callback_tasks = list(self._file_callback_tasks)
+        for task in callback_tasks:
+            task.cancel()
+        if callback_tasks:
+            await asyncio.gather(*callback_tasks, return_exceptions=True)
+        self._file_callback_tasks.clear()
 
         if self._server:
             try:

@@ -154,6 +154,160 @@ describe('MakerworldPage', () => {
     expect(saveButtons.length).toBe(2);
   });
 
+  it('applies saved MakerWorld archive defaults and links the cover option to archival', async () => {
+    useAuthedHandlers();
+    server.use(
+      http.get('*/settings/', () =>
+        HttpResponse.json({
+          auto_archive: true,
+          save_thumbnails: true,
+          preferred_slicer: 'bambu_studio',
+          makerworld_archive_details_default: true,
+          makerworld_cover_thumbnail_default: true,
+        }),
+      ),
+      http.post('*/makerworld/resolve', () => HttpResponse.json(resolveResponse())),
+    );
+    render(<MakerworldPage />);
+    await userEvent.type(
+      await screen.findByPlaceholderText(/https:\/\/makerworld\.com/i),
+      'https://makerworld.com/en/models/1400373',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Resolve/i }));
+
+    const archiveDetails = await screen.findByRole('checkbox', { name: /Archive MakerWorld details/i });
+    const coverThumbnail = screen.getByRole('checkbox', { name: /Use MakerWorld cover as library thumbnail/i });
+    expect(archiveDetails).toBeChecked();
+    expect(coverThumbnail).toBeChecked();
+
+    await userEvent.click(coverThumbnail);
+    expect(archiveDetails).toBeChecked();
+    await userEvent.click(archiveDetails);
+    expect(coverThumbnail).not.toBeChecked();
+  });
+
+  it('imports and archives only the selected profiles', async () => {
+    useAuthedHandlers();
+    const importBodies: Array<Record<string, unknown>> = [];
+    server.use(
+      http.post('*/makerworld/resolve', () => HttpResponse.json(resolveResponse())),
+      http.post('*/makerworld/import', async ({ request }) => {
+        const body = (await request.json()) as Record<string, unknown>;
+        importBodies.push(body);
+        return HttpResponse.json({
+          library_file_id: 99,
+          filename: 'selected.3mf',
+          folder_id: 7,
+          profile_id: body.profile_id,
+          was_existing: false,
+          source_archive: { saved: true, image_count: 1, warning: null },
+        });
+      }),
+    );
+    render(<MakerworldPage />);
+    await userEvent.type(
+      await screen.findByPlaceholderText(/https:\/\/makerworld\.com/i),
+      'https://makerworld.com/en/models/1400373',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Resolve/i }));
+
+    const importSelected = await screen.findByRole('button', { name: /Import selected/i });
+    expect(importSelected).toBeDisabled();
+    await userEvent.click(screen.getByRole('checkbox', { name: /Select 12 cells/i }));
+    const useCoverThumbnail = screen.getByRole('checkbox', { name: /Use MakerWorld cover as library thumbnail/i });
+    expect(useCoverThumbnail).toBeEnabled();
+    await userEvent.click(useCoverThumbnail);
+    expect(screen.getByRole('checkbox', { name: /Archive MakerWorld details/i })).toBeChecked();
+    expect(importSelected).toHaveTextContent('1');
+    await userEvent.click(importSelected);
+
+    await waitFor(() => expect(importBodies).toHaveLength(1));
+    expect(importBodies[0]).toMatchObject({
+      profile_id: 298919564,
+      archive_details: true,
+      archive_image_count: 1,
+      use_cover_as_thumbnail: true,
+    });
+  });
+
+  it('opens locally archived source details from a saved profile', async () => {
+    useAuthedHandlers();
+    server.use(
+      http.post('*/makerworld/resolve', () => HttpResponse.json(resolveResponse())),
+      http.post('*/makerworld/import', () =>
+        HttpResponse.json({
+          library_file_id: 99,
+          filename: 'seed-starter.3mf',
+          folder_id: 7,
+          profile_id: 298919107,
+          was_existing: false,
+          source_archive: { saved: true, image_count: 1, warning: null },
+        }),
+      ),
+      http.get('*/library/files/99/source-snapshot', () =>
+        HttpResponse.json({
+          title: 'Seed Starter',
+          creator: 'Meyui',
+          license: 'Standard',
+          description_html: '<p>Archived local instructions</p>',
+          captured_at: '2026-09-10T12:00:00Z',
+          source_url: 'https://makerworld.com/en/models/1400373',
+          images: [{ name: 'cover.png', role: 'cover' }],
+        }),
+      ),
+    );
+    render(<MakerworldPage />);
+    await userEvent.type(
+      await screen.findByPlaceholderText(/https:\/\/makerworld\.com/i),
+      'https://makerworld.com/en/models/1400373',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Resolve/i }));
+    await userEvent.click(screen.getByRole('checkbox', { name: /Archive MakerWorld details/i }));
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Save$/i }))[0]);
+
+    const detailsButton = await screen.findByRole('button', { name: /Source details/i });
+    await userEvent.click(detailsButton);
+    expect(await screen.findByText('Archived local instructions')).toBeInTheDocument();
+    expect(screen.getAllByRole('img', { name: 'Seed Starter' }).at(-1)).toHaveAttribute(
+      'src',
+      expect.stringContaining('/library/files/99/source-assets/cover.png'),
+    );
+  });
+
+  it('only requests source-detail archival after the user opts in', async () => {
+    useAuthedHandlers();
+    let importBody: Record<string, unknown> | null = null;
+    server.use(
+      http.post('*/makerworld/resolve', () => HttpResponse.json(resolveResponse())),
+      http.post('*/makerworld/import', async ({ request }) => {
+        importBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json({
+          library_file_id: 99,
+          filename: 'benchy.3mf',
+          folder_id: 7,
+          profile_id: 298919107,
+          was_existing: false,
+          source_archive: { saved: true, image_count: 1, warning: null },
+        });
+      }),
+    );
+    render(<MakerworldPage />);
+    await userEvent.type(
+      await screen.findByPlaceholderText(/https:\/\/makerworld\.com/i),
+      'https://makerworld.com/en/models/1400373',
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Resolve/i }));
+
+    const archiveToggle = await screen.findByRole('checkbox', { name: /Archive MakerWorld details/i });
+    expect(archiveToggle).not.toBeChecked();
+    await userEvent.click(archiveToggle);
+    await userEvent.click((await screen.findAllByRole('button', { name: /^Save$/ }))[0]);
+
+    await waitFor(() => {
+      expect(importBody).toMatchObject({ archive_details: true, archive_image_count: 1 });
+    });
+  });
+
   it('interpolates the slicer name into the slice button (Bambu Studio by default)', async () => {
     useAuthedHandlers({ slicer: 'bambu_studio' });
     server.use(

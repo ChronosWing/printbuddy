@@ -133,6 +133,62 @@ def test_update_content_marks_paused_without_countdown():
     assert content["tint"] == "#f59e0b"
 
 
+def test_update_content_includes_configured_button():
+    content = build_update_content(
+        printer_name="Workshop P1S",
+        filename="dragon.3mf",
+        progress=50,
+        button_title="Pause",
+        button_url="https://octoprint.example.com/api/pause",
+    )
+
+    assert content["button"] == {
+        "title": "Pause",
+        "url": "https://octoprint.example.com/api/pause",
+        "open": True,
+    }
+
+
+def test_update_content_omits_button_with_bamfleet_deep_link_url():
+    content = build_update_content(
+        printer_name="Workshop P1S",
+        filename="dragon.3mf",
+        progress=50,
+        button_title="Open Bamfleet",
+        button_url="bamfleet://printers",
+    )
+
+    assert "button" not in content
+
+
+def test_update_content_omits_button_with_non_https_url():
+    content = build_update_content(
+        printer_name="Workshop P1S",
+        filename="dragon.3mf",
+        progress=50,
+        button_title="Open Printbuddy",
+        button_url="http://10.17.1.96:8000/",
+    )
+
+    assert "button" not in content
+
+
+def test_end_content_includes_configured_button():
+    content = build_end_content(
+        printer_name="Workshop P1S",
+        filename="dragon.3mf",
+        status="completed",
+        button_title="Open Printbuddy",
+        button_url="https://printbuddy.example.com/printers/7",
+    )
+
+    assert content["button"] == {
+        "title": "Open Printbuddy",
+        "url": "https://printbuddy.example.com/printers/7",
+        "open": True,
+    }
+
+
 def test_end_content_uses_terminal_status_visual_state():
     content = build_end_content(
         printer_name="Workshop P1S",

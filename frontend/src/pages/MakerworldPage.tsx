@@ -3,7 +3,7 @@ import DOMPurify from 'dompurify';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, ArrowRight, Check, ChevronLeft, ChevronRight, Download, ExternalLink, FolderOpen, Globe, Images, Loader2, Trash2, X } from 'lucide-react';
+import { AlertCircle, ArrowRight, Check, ChevronLeft, ChevronRight, Download, ExternalLink, FolderOpen, Globe, Images, Link2, Loader2, Trash2, X } from 'lucide-react';
 
 import {
   api,
@@ -16,6 +16,7 @@ import { Button } from '../components/Button';
 import { Card, CardContent, CardHeader } from '../components/Card';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { SliceModal, type SliceSource } from '../components/SliceModal';
+import { SourceSnapshotModal } from '../components/SourceSnapshotModal';
 import { Cog } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useToast } from '../contexts/ToastContext';
@@ -122,6 +123,9 @@ export function MakerworldPage() {
   // of a user-selected folder; external read-only folders are filtered out
   // of the picker because the backend rejects those with 403.
   const [selectedFolderId, setSelectedFolderId] = useState<number | null>(null);
+  const [archiveDetails, setArchiveDetails] = useState(false);
+  const [useCoverAsThumbnail, setUseCoverAsThumbnail] = useState(false);
+  const [selectedProfileIds, setSelectedProfileIds] = useState<Set<number>>(() => new Set());
   // Bulk-import progress. ``null`` when idle; ``{current, total}`` while
   // the "Import all" button is walking through ``instances[]``.
   const [bulkProgress, setBulkProgress] = useState<{ current: number; total: number } | null>(null);
@@ -155,6 +159,7 @@ export function MakerworldPage() {
   const [importsByProfile, setImportsByProfile] = useState<
     Record<number, MakerworldImportResponse>
   >({});
+  const [sourceDetailsImport, setSourceDetailsImport] = useState<MakerworldImportResponse | null>(null);
 
   const statusQuery = useQuery({
     queryKey: ['makerworld-status'],
@@ -183,7 +188,38 @@ export function MakerworldPage() {
   const preferredSlicerName =
     preferredSlicer === 'orcaslicer' ? 'OrcaSlicer' : 'Bambu Studio';
   const useSlicerApi = settingsQuery.data?.use_slicer_api ?? false;
+  const makerworldArchiveDetailsDefault =
+    settingsQuery.data?.makerworld_archive_details_default ?? false;
+  const makerworldCoverThumbnailDefault =
+    settingsQuery.data?.makerworld_cover_thumbnail_default ?? false;
+  const canUpdateSettings = hasPermission('settings:update');
 
+  useEffect(() => {
+    const useCoverThumbnail = makerworldCoverThumbnailDefault;
+    setArchiveDetails(makerworldArchiveDetailsDefault || useCoverThumbnail);
+    setUseCoverAsThumbnail(useCoverThumbnail);
+  }, [makerworldArchiveDetailsDefault, makerworldCoverThumbnailDefault]);
+
+  const importDefaultsMutation = useMutation({
+    mutationFn: (defaults: {
+      makerworld_archive_details_default: boolean;
+      makerworld_cover_thumbnail_default: boolean;
+    }) => api.updateSettings(defaults),
+    onSuccess: (settings) => {
+      queryClient.setQueryData(['settings'], settings);
+      showToast(t('makerworld.importDefaultsSaved'), 'success');
+    },
+    onError: (err: Error) => showToast(err.message || t('makerworld.importDefaultsSaveFailed'), 'error'),
+  });
+
+  const updateImportDefaults = (archiveByDefault: boolean, coverByDefault: boolean) => {
+    if (!canUpdateSettings) return;
+    importDefaultsMutation.mutate({
+      makerworld_archive_details_default: archiveByDefault || coverByDefault,
+      makerworld_cover_thumbnail_default: coverByDefault,
+    });
+  };
+  // MakerWorld plates are unsliced project files
   // Slice-via-API modal source. When set, the SliceModal is shown for the
   // referenced library file; it covers MakerWorld's "Slice in <Slicer>" /
   // "Open in Slicer" actions whenever the user has Use Slicer API enabled.
@@ -198,8 +234,9 @@ export function MakerworldPage() {
     onSuccess: (data, url) => {
       setResolved(data);
       setResolvedForUrl(url);
-      // Fresh resolve — clear any success card from a previous model.
+      // Fresh resolve — clear any success and selection from a previous model.
       setImportsByProfile({});
+      setSelectedProfileIds(new Set());
     },
     onError: (err: Error) => showToast(err.message || t('makerworld.errors.resolveFailed'), 'error'),
   });
@@ -213,12 +250,13 @@ export function MakerworldPage() {
       setResolved(null);
       setResolvedForUrl('');
       setImportsByProfile({});
+      setSelectedProfileIds(new Set());
     }
   }, [urlInput, resolved, resolvedForUrl]);
 
   const importMutation = useMutation({
     mutationFn: ({ instanceId, profileId }: { instanceId: number; profileId: number | null }) =>
-      api.importMakerworldInstance(resolved?.model_id ?? 0, instanceId, profileId, selectedFolderId),
+      api.importMakerworldInstance(resolved?.model_id ?? 0, instanceId, profileId, selectedFolderId, archiveDetails, 1, useCoverAsThumbnail),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
       // Backend auto-creates a "MakerWorld" folder on first import; refresh
@@ -228,11 +266,24 @@ export function MakerworldPage() {
       // follow-up buttons even after multiple imports in the same session.
       if (data.profile_id) {
         setImportsByProfile((prev) => ({ ...prev, [data.profile_id!]: data }));
+        setSelectedProfileIds((prev) => {
+          const next = new Set(prev);
+          next.delete(data.profile_id!);
+          return next;
+        });
       }
       showToast(
         data.was_existing ? t('makerworld.alreadyInLibrary') : t('makerworld.importSuccess', { filename: data.filename }),
         'success',
       );
+      if (data.source_archive?.warning) {
+        showToast(
+          data.source_archive.saved
+            ? t('makerworld.archivePartialWarning')
+            : t('makerworld.archiveFailedWarning'),
+          'warning',
+        );
+      }
     },
     onError: (err: Error) => showToast(err.message || t('makerworld.errors.downloadFailed'), 'error'),
   });
@@ -272,13 +323,26 @@ export function MakerworldPage() {
   // own "Download and Open" button behaviour.
   const sliceMutation = useMutation({
     mutationFn: ({ instanceId, profileId }: { instanceId: number; profileId: number | null }) =>
-      api.importMakerworldInstance(resolved?.model_id ?? 0, instanceId, profileId, selectedFolderId),
+      api.importMakerworldInstance(resolved?.model_id ?? 0, instanceId, profileId, selectedFolderId, archiveDetails, 1, useCoverAsThumbnail),
     onSuccess: async (data: MakerworldImportResponse) => {
       queryClient.invalidateQueries({ queryKey: ['library-files'] });
       queryClient.invalidateQueries({ queryKey: ['library-folders'] });
       queryClient.invalidateQueries({ queryKey: ['makerworld-recent-imports'] });
       if (data.profile_id) {
         setImportsByProfile((prev) => ({ ...prev, [data.profile_id!]: data }));
+        setSelectedProfileIds((prev) => {
+          const next = new Set(prev);
+          next.delete(data.profile_id!);
+          return next;
+        });
+      }
+      if (data.source_archive?.warning) {
+        showToast(
+          data.source_archive.saved
+            ? t('makerworld.archivePartialWarning')
+            : t('makerworld.archiveFailedWarning'),
+          'warning',
+        );
       }
       // After import, branch on the user's slicer-API preference: API mode
       // opens the in-app SliceModal; URI mode hands the file off to the
@@ -337,16 +401,16 @@ export function MakerworldPage() {
     return cover ? [{ name: 'cover', url: cover }] : [];
   };
 
-  // "Import all plates" — walks through ``instances[]`` sequentially (not
-  // in parallel) so we don't hammer the Bambu API. Skips plates that have
-  // already been imported in this session. On per-plate failure, shows the
-  // error toast but continues with the next plate (partial success is
+  // "Import selected profiles" — walks through the explicit selection sequentially (not
+  // in parallel) so we don't hammer the Bambu API. Skips profiles that have
+  // already been imported in this session. On per-profile failure, shows the
+  // error toast but continues with the next selection (partial success is
   // better than a whole-batch abort).
-  const handleImportAll = async () => {
+  const handleImportSelected = async () => {
     if (!resolved) return;
     const plates = resolved.instances.filter((inst) => {
       const pid = pickNumber(inst, 'profileId');
-      return pid !== null && !importsByProfile[pid];
+      return pid !== null && selectedProfileIds.has(pid) && !importsByProfile[pid];
     });
     if (plates.length === 0) return;
 
@@ -394,6 +458,10 @@ export function MakerworldPage() {
   const design = resolved?.design;
   const creator = pickObject(design, 'designCreator');
   const instances = resolved?.instances ?? [];
+  const selectableProfileIds = instances
+    .map((inst) => pickNumber(inst, 'profileId'))
+    .filter((profileId): profileId is number => profileId !== null && !importsByProfile[profileId]);
+  const selectedProfileCount = selectableProfileIds.filter((profileId) => selectedProfileIds.has(profileId)).length;
   const alreadyImported = (resolved?.already_imported_library_ids.length ?? 0) > 0;
 
   const hasToken = statusQuery.data?.has_cloud_token ?? false;
@@ -560,6 +628,54 @@ export function MakerworldPage() {
                       </option>
                     ))}
                 </select>
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={archiveDetails}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setArchiveDetails(enabled);
+                      if (!enabled) setUseCoverAsThumbnail(false);
+                    }}
+                    disabled={bulkProgress !== null}
+                    className="h-4 w-4 rounded border-gray-400 text-bambu-green focus:ring-bambu-green"
+                  />
+                  <span title={t('makerworld.archiveDetailsDescription')}>
+                    {t('makerworld.archiveDetails')}
+                  </span>
+                </label>
+                <label className="inline-flex cursor-pointer items-center gap-2 text-xs text-gray-600 dark:text-gray-300">
+                  <input
+                    type="checkbox"
+                    checked={useCoverAsThumbnail}
+                    onChange={(event) => {
+                      const enabled = event.target.checked;
+                      setUseCoverAsThumbnail(enabled);
+                      if (enabled) setArchiveDetails(true);
+                    }}
+                    disabled={bulkProgress !== null}
+                    className="h-4 w-4 rounded border-gray-400 text-bambu-green focus:ring-bambu-green"
+                  />
+                  <span title={t('makerworld.useCoverAsThumbnailDescription')}>
+                    {t('makerworld.useCoverAsThumbnail')}
+                  </span>
+                </label>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={bulkProgress !== null || selectableProfileIds.length === 0}
+                  onClick={() => setSelectedProfileIds(new Set(selectableProfileIds))}
+                >
+                  {t('common.selectAll')}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={bulkProgress !== null || selectedProfileCount === 0}
+                  onClick={() => setSelectedProfileIds(new Set())}
+                >
+                  {t('common.deselectAll')}
+                </Button>
                 <Button
                   variant="primary"
                   size="sm"
@@ -568,9 +684,10 @@ export function MakerworldPage() {
                     !canDownload ||
                     bulkProgress !== null ||
                     importMutation.isPending ||
-                    sliceMutation.isPending
+                    sliceMutation.isPending ||
+                    selectedProfileCount === 0
                   }
-                  onClick={handleImportAll}
+                  onClick={handleImportSelected}
                 >
                   {bulkProgress !== null ? (
                     <>
@@ -583,7 +700,9 @@ export function MakerworldPage() {
                   ) : (
                     <>
                       <Download className="w-4 h-4" />
-                      <span className="ml-2">{t('makerworld.importAll')}</span>
+                      <span className="ml-2">
+                        {t('makerworld.importSelected', { count: selectedProfileCount })}
+                      </span>
                     </>
                   )}
                 </Button>
@@ -623,6 +742,24 @@ export function MakerworldPage() {
                     className="flex flex-col gap-2 p-3 border rounded border-gray-200 dark:border-gray-700"
                   >
                     <div className="flex gap-3 items-center">
+                      <input
+                        type="checkbox"
+                        checked={profileId !== null && selectedProfileIds.has(profileId)}
+                        onChange={(event) => {
+                          if (profileId === null) return;
+                          setSelectedProfileIds((prev) => {
+                            const next = new Set(prev);
+                            if (event.target.checked) next.add(profileId);
+                            else next.delete(profileId);
+                            return next;
+                          });
+                        }}
+                        disabled={profileId === null || imported !== undefined || bulkProgress !== null}
+                        aria-label={t('makerworld.selectProfile', {
+                          profile: instanceTitle || t('makerworld.plateDefaultName', { n: idx + 1 }),
+                        })}
+                        className="h-4 w-4 shrink-0 rounded border-gray-400 text-bambu-green focus:ring-bambu-green"
+                      />
                       {(() => {
                         const gallery = getInstanceImages(inst);
                         const canOpen = gallery.length > 0;
@@ -750,6 +887,16 @@ export function MakerworldPage() {
                           <FolderOpen className="w-3.5 h-3.5" />
                           <span className="ml-1.5">{t('makerworld.viewInLibrary')}</span>
                         </Button>
+                        {imported.source_archive?.saved && (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setSourceDetailsImport(imported)}
+                          >
+                            <Link2 className="w-3.5 h-3.5" />
+                            <span className="ml-1.5">{t('fileManager.sourceDetails')}</span>
+                          </Button>
+                        )}
                         {useSlicerApi ? (
                           <Button
                             variant="ghost"
@@ -824,7 +971,61 @@ export function MakerworldPage() {
         {/* Right column — Recent imports sidebar. Sticky at lg+ so it stays
             reachable while browsing long plate lists. Vertical list here,
             not the horizontal scroll we used in the bottom-of-page layout. */}
-        <aside className="lg:sticky lg:top-6 lg:self-start min-w-0">
+        <aside className="lg:sticky lg:top-6 lg:self-start min-w-0 space-y-4">
+          <Card>
+            <CardHeader>
+              <h2 className="text-base font-semibold">{t('makerworld.importDefaults')}</h2>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-3 text-sm">
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {t('makerworld.importDefaultsDescription')}
+                </p>
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    aria-label={t('makerworld.archiveDetailsDefaultControl')}
+                    checked={makerworldArchiveDetailsDefault}
+                    onChange={(event) =>
+                      updateImportDefaults(
+                        event.target.checked,
+                        event.target.checked ? makerworldCoverThumbnailDefault : false,
+                      )
+                    }
+                    disabled={!canUpdateSettings || importDefaultsMutation.isPending}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-400 text-bambu-green focus:ring-bambu-green"
+                  />
+                  <span>
+                    <span className="block font-medium">{t('makerworld.archiveDetailsByDefault')}</span>
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      {t('makerworld.archiveDetailsByDefaultDescription')}
+                    </span>
+                  </span>
+                </label>
+                <label className="flex cursor-pointer items-start gap-3">
+                  <input
+                    type="checkbox"
+                    aria-label={t('makerworld.coverThumbnailDefaultControl')}
+                    checked={makerworldCoverThumbnailDefault}
+                    onChange={(event) =>
+                      updateImportDefaults(
+                        makerworldArchiveDetailsDefault,
+                        event.target.checked,
+                      )
+                    }
+                    disabled={!canUpdateSettings || importDefaultsMutation.isPending}
+                    className="mt-0.5 h-4 w-4 rounded border-gray-400 text-bambu-green focus:ring-bambu-green"
+                  />
+                  <span>
+                    <span className="block font-medium">{t('makerworld.useCoverAsThumbnailByDefault')}</span>
+                    <span className="block text-xs text-gray-500 dark:text-gray-400">
+                      {t('makerworld.useCoverAsThumbnailByDefaultDescription')}
+                    </span>
+                  </span>
+                </label>
+              </div>
+            </CardContent>
+          </Card>
           {recentQuery.data && recentQuery.data.length > 0 && (
             <Card>
               <CardHeader>
@@ -936,6 +1137,14 @@ export function MakerworldPage() {
         <SliceModal
           source={sliceModalSource}
           onClose={() => setSliceModalSource(null)}
+        />
+      )}
+
+      {sourceDetailsImport && (
+        <SourceSnapshotModal
+          fileId={sourceDetailsImport.library_file_id}
+          fallbackTitle={sourceDetailsImport.filename}
+          onClose={() => setSourceDetailsImport(null)}
         />
       )}
 

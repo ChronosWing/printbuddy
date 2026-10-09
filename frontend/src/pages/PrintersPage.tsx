@@ -1939,6 +1939,7 @@ function PrinterCard({
   const { showToast } = useToast();
   const { hasPermission } = useAuth();
   const [showMenu, setShowMenu] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteArchives, setDeleteArchives] = useState(true);
   const [showEditModal, setShowEditModal] = useState(false);
@@ -2027,6 +2028,19 @@ function PrinterCard({
   const [editingRoi, setEditingRoi] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
   const [isSavingRoi, setIsSavingRoi] = useState(false);
   const [plateCheckLightWasOff, setPlateCheckLightWasOff] = useState(false);
+
+  useEffect(() => {
+    if (!showMenu) return;
+
+    const handleClickOutside = (event: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setShowMenu(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showMenu]);
 
   const { data: status } = useQuery({
     queryKey: ['printerStatus', printer.id],
@@ -3372,16 +3386,19 @@ function PrinterCard({
               </div>
             </div>
             {/* Menu button */}
-            <div className="relative flex-shrink-0">
+            <div ref={menuRef} className="relative flex-shrink-0">
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => setShowMenu(!showMenu)}
+                aria-label={t('layout.openMenu')}
+                aria-haspopup="menu"
+                aria-expanded={showMenu}
               >
                 <MoreVertical className="w-4 h-4" />
               </Button>
               {showMenu && (
-                <div className="absolute right-0 mt-2 w-48 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg shadow-lg z-20">
+                <div role="menu" className="absolute right-0 mt-2 w-48 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg shadow-lg z-20">
                   <button
                     className={`w-full px-4 py-2 text-left text-sm flex items-center gap-2 ${
                       hasPermission('printers:update')
@@ -6633,6 +6650,7 @@ function AddPrinterModal({
     model: '',
     location: '',
     auto_archive: true,
+    reconnect_interval_seconds: 30,
     external_camera_url: '',
   });
 
@@ -7383,6 +7401,22 @@ function AddPrinterModal({
                 {t('printers.modal.autoArchiveLabel')}
               </label>
             </div>
+            <div>
+              <label htmlFor="reconnect_interval_seconds" className="block text-sm text-bambu-gray mb-1">
+                Offline reconnect interval (seconds)
+              </label>
+              <input
+                id="reconnect_interval_seconds"
+                type="number"
+                min={10}
+                max={3600}
+                required
+                className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                value={form.reconnect_interval_seconds ?? 30}
+                onChange={(e) => setForm({ ...form, reconnect_interval_seconds: Number(e.target.value) })}
+              />
+              <p className="text-xs text-bambu-gray mt-1">Printbuddy retries active offline printers in the background, even when this page is closed. Default: 30 seconds.</p>
+            </div>
             {!isHttpProvider && (
               <button
                 type="button"
@@ -7744,6 +7778,7 @@ function EditPrinterModal({
     model: printer.model || '',
     location: printer.location || '',
     auto_archive: printer.auto_archive,
+    reconnect_interval_seconds: printer.reconnect_interval_seconds ?? 30,
     prusa_link_api_auth_mode: parsePrusaLinkApiAuthMode(printer.provider_options),
   });
 
@@ -7778,6 +7813,7 @@ function EditPrinterModal({
       model: form.model || undefined,
       location: form.location || undefined,
       auto_archive: form.auto_archive,
+      reconnect_interval_seconds: form.reconnect_interval_seconds,
     };
     if (isPrusaLinkProvider) {
       data.provider_options = buildPrusaLinkProviderOptions(form.prusa_link_api_auth_mode, printer.provider_options);
@@ -7932,6 +7968,22 @@ function EditPrinterModal({
               <label htmlFor="edit_auto_archive" className="text-sm text-bambu-gray">
                 {t('printers.modal.autoArchiveLabel')}
               </label>
+            </div>
+            <div>
+              <label htmlFor="edit_reconnect_interval_seconds" className="block text-sm text-bambu-gray mb-1">
+                Offline reconnect interval (seconds)
+              </label>
+              <input
+                id="edit_reconnect_interval_seconds"
+                type="number"
+                min={10}
+                max={3600}
+                required
+                className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white focus:border-bambu-green focus:outline-none"
+                value={form.reconnect_interval_seconds}
+                onChange={(e) => setForm({ ...form, reconnect_interval_seconds: Number(e.target.value) })}
+              />
+              <p className="text-xs text-bambu-gray mt-1">Retries happen in Printbuddy’s backend while the printer is active, without needing this page open.</p>
             </div>
             {saveWarning ? (
               <div className="rounded-lg bg-amber-500/10 border border-amber-500/30 p-3 space-y-3">

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from fastapi.responses import FileResponse as FastAPIFileResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.background import BackgroundTask
 
 from backend.app.api.routes.cloud import resolve_api_key_cloud_owner
 from backend.app.core.auth import (
@@ -485,6 +487,43 @@ async def save_3mf_bytes_to_library(
     await db.commit()
     await db.refresh(library_file)
     return library_file, False
+
+
+def extract_gcode_metadata(header: str) -> dict[str, str]:
+    """Extract safe, displayable material metadata from a raw G-code header.
+
+    Elegoo may emit executable startup commands before its metadata block, so
+    parsing continues through the bounded header window. It stops at the first
+    layer marker, where later comments can describe tool changes rather than
+    the job's declared material.
+    """
+    filament_types: list[str] = []
+    header_pattern = re.compile(r"^\s*;\s*(?:initial_filament|filament_type)\s*[:=]\s*(.+?)\s*$", re.IGNORECASE)
+
+    layer_marker = re.compile(r"^\s*;\s*(?:LAYER(?:\s*:|_CHANGE\b)|AFTER_LAYER_CHANGE\b)", re.IGNORECASE)
+
+    for line in header.splitlines():
+        if layer_marker.match(line):
+            break
+        match = header_pattern.match(line)
+        if not match:
+            continue
+        for value in re.split(r"[;,]", match.group(1)):
+            material = value.strip()
+            if material and material not in filament_types:
+                filament_types.append(material)
+
+    return {"filament_type": ", ".join(filament_types)} if filament_types else {}
+
+
+def extract_gcode_file_metadata(file_path: Path) -> dict[str, str]:
+    """Read only the raw G-code header required for file-card metadata."""
+    try:
+        with file_path.open("r", encoding="utf-8", errors="ignore") as f:
+            return extract_gcode_metadata(f.read(64 * 1024))
+    except OSError as exc:
+        logger.debug("Failed to read G-code metadata from %s: %s", file_path, exc)
+        return {}
 
 
 def extract_gcode_thumbnail(file_path: Path) -> bytes | None:
@@ -1403,7 +1442,9 @@ async def scan_external_folder(
             # Doing them inline would block the HTTP request for minutes on a
             # large NAS mount (#1299).
 
-            # Extract gcode thumbnail
+            # Extract raw G-code header metadata and thumbnail.
+            if file_type == "gcode":
+                file_metadata = extract_gcode_file_metadata(filepath) or None
             if file_type == "gcode" and thumbnail_path is None:
                 thumb_data = extract_gcode_thumbnail(filepath)
                 if thumb_data:
@@ -1547,11 +1588,13 @@ async def list_files(
         print_name = None
         print_time = None
         filament_grams = None
+        filament_type = None
         sliced_for_model = None
         if f.file_metadata:
             print_name = f.file_metadata.get("print_name")
             print_time = f.file_metadata.get("print_time_seconds")
             filament_grams = f.file_metadata.get("filament_used_grams")
+            filament_type = f.file_metadata.get("filament_type")
             sliced_for_model = f.file_metadata.get("sliced_for_model")
 
         file_list.append(
@@ -1563,6 +1606,8 @@ async def list_files(
                 file_type=f.file_type,
                 file_size=f.file_size,
                 thumbnail_path=f.thumbnail_path,
+                source_type=f.source_type,
+                source_snapshot_available=bool(f.source_snapshot_path),
                 print_count=f.print_count,
                 duplicate_count=hash_counts.get(f.file_hash, 0) if f.file_hash else 0,
                 created_by_id=f.created_by_id,
@@ -1571,6 +1616,7 @@ async def list_files(
                 print_name=print_name,
                 print_time_seconds=print_time,
                 filament_used_grams=filament_grams,
+                filament_type=filament_type,
                 sliced_for_model=sliced_for_model,
             )
         )
@@ -1682,8 +1728,9 @@ async def upload_file(
                 logger.warning("Failed to parse 3MF: %s", e)
 
         elif ext == ".gcode":
-            # Extract embedded thumbnail from gcode
+            # Extract raw G-code header metadata and embedded thumbnail.
             try:
+                metadata = extract_gcode_file_metadata(file_path)
                 thumbnail_data = extract_gcode_thumbnail(file_path)
                 if thumbnail_data:
                     thumb_filename = f"{uuid.uuid4().hex}.png"
@@ -2221,6 +2268,60 @@ async def add_files_to_queue(
     await db.commit()
 
     return AddToQueueResponse(added=added, errors=errors)
+
+
+@router.post("/files/download-zip")
+async def download_library_files_as_zip(
+    request: dict,
+    db: AsyncSession = Depends(get_db),
+    _: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_READ)),
+):
+    """Download selected active library files as a ZIP archive."""
+    file_ids = request.get("file_ids", [])
+    if not isinstance(file_ids, list) or not file_ids or not all(isinstance(file_id, int) for file_id in file_ids):
+        raise HTTPException(status_code=422, detail="file_ids must contain at least one file ID")
+
+    requested_ids = list(dict.fromkeys(file_ids))
+    result = await db.execute(
+        select(LibraryFile).where(LibraryFile.id.in_(requested_ids), LibraryFile.deleted_at.is_(None))
+    )
+    files_by_id = {file.id: file for file in result.scalars()}
+    missing_ids = [file_id for file_id in requested_ids if file_id not in files_by_id]
+    if missing_ids:
+        raise HTTPException(status_code=404, detail="One or more selected files were not found")
+
+    with tempfile.NamedTemporaryFile(prefix="printbuddy-library-", suffix=".zip", delete=False) as temporary_file:
+        archive_path = Path(temporary_file.name)
+
+    used_names: set[str] = set()
+    try:
+        with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file_id in requested_ids:
+                file = files_by_id[file_id]
+                abs_path = to_absolute_path(file.file_path)
+                if not abs_path or not abs_path.is_file():
+                    raise HTTPException(
+                        status_code=404, detail=f"Selected file is not available on disk: {file.filename}"
+                    )
+
+                archive_name = Path(file.filename).name or f"file-{file.id}"
+                stem, suffix = Path(archive_name).stem, Path(archive_name).suffix
+                duplicate_index = 2
+                while archive_name in used_names:
+                    archive_name = f"{stem} ({duplicate_index}){suffix}"
+                    duplicate_index += 1
+                used_names.add(archive_name)
+                archive.write(abs_path, archive_name)
+    except Exception:
+        archive_path.unlink(missing_ok=True)
+        raise
+
+    return FastAPIFileResponse(
+        str(archive_path),
+        filename="library-files.zip",
+        media_type="application/zip",
+        background=BackgroundTask(archive_path.unlink, missing_ok=True),
+    )
 
 
 @router.get("/files/{file_id}/plates")
@@ -3970,11 +4071,13 @@ async def get_file(
     print_name = None
     print_time = None
     filament_grams = None
+    filament_type = None
     sliced_for_model = None
     if file.file_metadata:
         print_name = file.file_metadata.get("print_name")
         print_time = file.file_metadata.get("print_time_seconds")
         filament_grams = file.file_metadata.get("filament_used_grams")
+        filament_type = file.file_metadata.get("filament_type")
         sliced_for_model = file.file_metadata.get("sliced_for_model")
 
     return FileResponseSchema(
@@ -3993,6 +4096,9 @@ async def get_file(
         print_count=file.print_count,
         last_printed_at=file.last_printed_at,
         notes=file.notes,
+        source_type=file.source_type,
+        source_url=file.source_url,
+        source_snapshot_available=bool(file.source_snapshot_path),
         duplicates=duplicates if duplicates else None,
         duplicate_count=duplicate_count,
         created_by_id=file.created_by_id,
@@ -4002,6 +4108,7 @@ async def get_file(
         print_name=print_name,
         print_time_seconds=print_time,
         filament_used_grams=filament_grams,
+        filament_type=filament_type,
         sliced_for_model=sliced_for_model,
     )
 
@@ -4121,6 +4228,116 @@ async def delete_file(
 
 
 # ============ File Content Endpoints ============
+
+
+def _open_source_snapshot(file: LibraryFile) -> zipfile.ZipFile:
+    if not file.source_snapshot_path:
+        raise HTTPException(status_code=404, detail="No archived source details")
+    try:
+        snapshot_path = to_absolute_path(file.source_snapshot_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="Archived source details not found") from exc
+    snapshots_root = (get_library_dir() / "source-snapshots").resolve()
+    if snapshot_path is None:
+        raise HTTPException(status_code=404, detail="Archived source details not found")
+    resolved_path = snapshot_path.resolve()
+    if not resolved_path.is_relative_to(snapshots_root) or not resolved_path.is_file():
+        raise HTTPException(status_code=404, detail="Archived source details not found")
+    try:
+        return zipfile.ZipFile(resolved_path, "r")
+    except (OSError, zipfile.BadZipFile) as exc:
+        logger.warning("Could not open source snapshot for library file %s: %s", file.id, exc)
+        raise HTTPException(status_code=422, detail="Archived source details are unreadable") from exc
+
+
+def _read_source_manifest(file: LibraryFile, archive: zipfile.ZipFile) -> dict:
+    try:
+        info = archive.getinfo("snapshot.json")
+        if info.file_size > 512 * 1024:
+            raise HTTPException(status_code=422, detail="Archived source manifest is too large")
+        manifest = json.loads(archive.read(info))
+    except KeyError as exc:
+        raise HTTPException(status_code=422, detail="Archived source manifest is missing") from exc
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=422, detail="Archived source manifest is invalid") from exc
+    if not isinstance(manifest, dict):
+        raise HTTPException(status_code=422, detail="Archived source manifest is invalid")
+    return manifest
+
+
+@router.get("/files/{file_id}/source-snapshot")
+async def get_file_source_snapshot(
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: User | None = Depends(require_permission_if_auth_enabled(Permission.LIBRARY_READ)),
+):
+    """Return locally archived source metadata with authenticated asset URLs."""
+    result = await db.execute(LibraryFile.active().where(LibraryFile.id == file_id))
+    file = result.scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    with _open_source_snapshot(file) as archive:
+        manifest = _read_source_manifest(file, archive)
+    images = manifest.get("images")
+    safe_images = []
+    if isinstance(images, list):
+        for image in images:
+            if not isinstance(image, dict):
+                continue
+            name = image.get("name")
+            role = image.get("role")
+            if not isinstance(name, str) or not isinstance(role, str) or Path(name).name != name:
+                continue
+            safe_images.append(
+                {
+                    "name": name,
+                    "role": role,
+                    "url": f"/api/v1/library/files/{file_id}/source-assets/{name}",
+                }
+            )
+    manifest["images"] = safe_images
+    return manifest
+
+
+@router.get("/files/{file_id}/source-assets/{asset_name}")
+async def get_file_source_asset(
+    file_id: int,
+    asset_name: str,
+    db: AsyncSession = Depends(get_db),
+    _: None = RequireCameraStreamTokenIfAuthEnabled,
+):
+    """Serve one allowlisted image from a library file's source snapshot."""
+    result = await db.execute(LibraryFile.active().where(LibraryFile.id == file_id))
+    file = result.scalar_one_or_none()
+    if file is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    with _open_source_snapshot(file) as archive:
+        manifest = _read_source_manifest(file, archive)
+        allowed_names = {
+            image.get("name")
+            for image in manifest.get("images", [])
+            if isinstance(image, dict) and isinstance(image.get("name"), str)
+        }
+        if asset_name not in allowed_names or Path(asset_name).name != asset_name:
+            raise HTTPException(status_code=404, detail="Archived source image not found")
+        try:
+            info = archive.getinfo(asset_name)
+            if info.file_size > 10 * 1024 * 1024:
+                raise HTTPException(status_code=422, detail="Archived source image is too large")
+            payload = archive.read(info)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Archived source image not found") from exc
+    media_type = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }.get(Path(asset_name).suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=415, detail="Unsupported archived source image type")
+    return Response(content=payload, media_type=media_type, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/files/{file_id}/download")

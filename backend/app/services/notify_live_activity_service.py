@@ -22,7 +22,7 @@ from backend.app.services.notify_live_activity_content import (
     build_start_content,
     build_update_content,
 )
-from backend.app.services.print_progress import effective_print_progress
+from backend.app.services.print_progress import live_activity_progress
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,7 @@ class NotifyLiveActivityService:
         self.status_getter = status_getter
         self.printer_name_getter = printer_name_getter
         self._scheduler_task: asyncio.Task | None = None
-        self._activity_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self._activity_locks: dict[tuple[int, str, int], asyncio.Lock] = {}
 
     async def on_print_start(
         self,
@@ -65,17 +65,18 @@ class NotifyLiveActivityService:
 
         filename = self._filename(data)
         remaining_time = self._remaining_time(data, archive_data=archive_data)
-        progress = effective_print_progress(data)
+        progress = live_activity_progress(data)
         layer_num = self._optional_int(data.get("layer_num"))
         total_layers = self._optional_int(data.get("total_layers"))
         subtask_id = self._subtask_id(data)
 
-        for provider, config in providers:
+        for provider, recipient_id, config in providers:
             provider_id = provider.id
-            async with self._activity_lock(provider_id, printer_id):
+            async with self._activity_lock(provider_id, recipient_id, printer_id):
                 await self._on_print_start_for_provider(
                     db,
                     provider_id=provider_id,
+                    recipient_id=recipient_id,
                     printer_id=printer_id,
                     printer_name=printer_name,
                     config=config,
@@ -103,12 +104,13 @@ class NotifyLiveActivityService:
     ) -> None:
         """Update active Live Activities for a progress change."""
         providers = await self._enabled_notify_providers(db, printer_id)
-        for provider, config in providers:
+        for provider, recipient_id, config in providers:
             provider_id = provider.id
-            async with self._activity_lock(provider_id, printer_id):
+            async with self._activity_lock(provider_id, recipient_id, printer_id):
                 await self._on_print_progress_for_provider(
                     db,
                     provider_id=provider_id,
+                    recipient_id=recipient_id,
                     printer_id=printer_id,
                     printer_name=printer_name,
                     filename=filename,
@@ -126,6 +128,7 @@ class NotifyLiveActivityService:
         db: AsyncSession,
         *,
         provider_id: int,
+        recipient_id: str,
         printer_id: int,
         printer_name: str,
         config: dict[str, Any],
@@ -138,7 +141,7 @@ class NotifyLiveActivityService:
     ) -> None:
         client = await self._client(config)
         try:
-            existing = await self._active_activity(db, provider_id, printer_id)
+            existing = await self._active_activity(db, provider_id, recipient_id, printer_id)
             if existing:
                 if self._same_print(existing, subtask_id=subtask_id, filename=filename):
                     logger.info(
@@ -160,6 +163,7 @@ class NotifyLiveActivityService:
             await self._create_activity(
                 db,
                 provider_id=provider_id,
+                recipient_id=recipient_id,
                 printer_id=printer_id,
                 activity_id=await client.start(
                     build_start_content(
@@ -171,6 +175,7 @@ class NotifyLiveActivityService:
                         total_layers=total_layers,
                         compact_display=self._compact_display(config),
                         native_countdown=self._native_tile_countdown(config),
+                        **self._button_options(config),
                     )
                 ),
                 subtask_id=subtask_id,
@@ -191,6 +196,7 @@ class NotifyLiveActivityService:
         db: AsyncSession,
         *,
         provider_id: int,
+        recipient_id: str,
         printer_id: int,
         printer_name: str,
         filename: str,
@@ -202,12 +208,13 @@ class NotifyLiveActivityService:
         state: str,
         config: dict[str, Any],
     ) -> None:
-        activity = await self._active_activity(db, provider_id, printer_id, subtask_id=subtask_id)
+        activity = await self._active_activity(db, provider_id, recipient_id, printer_id, subtask_id=subtask_id)
         if not activity:
             try:
                 await self._create_activity(
                     db,
                     provider_id=provider_id,
+                    recipient_id=recipient_id,
                     printer_id=printer_id,
                     activity_id=await (await self._client(config)).start(
                         build_start_content(
@@ -219,6 +226,7 @@ class NotifyLiveActivityService:
                             total_layers=total_layers,
                             compact_display=self._compact_display(config),
                             native_countdown=self._native_tile_countdown(config),
+                            **self._button_options(config),
                         )
                     ),
                     subtask_id=subtask_id,
@@ -281,6 +289,7 @@ class NotifyLiveActivityService:
             state=state,
             compact_display=self._compact_display(config),
             native_countdown=self._native_tile_countdown(config),
+            **self._button_options(config),
         )
         try:
             await client.update(activity.activity_id, payload)
@@ -305,6 +314,7 @@ class NotifyLiveActivityService:
             await self._create_activity(
                 db,
                 provider_id=provider_id,
+                recipient_id=recipient_id,
                 printer_id=printer_id,
                 activity_id=await client.start(
                     build_start_content(
@@ -316,6 +326,7 @@ class NotifyLiveActivityService:
                         total_layers=total_layers,
                         compact_display=self._compact_display(config),
                         native_countdown=self._native_tile_countdown(config),
+                        **self._button_options(config),
                     )
                 ),
                 subtask_id=subtask_id,
@@ -336,8 +347,8 @@ class NotifyLiveActivityService:
             await db.rollback()
             logger.exception("Notify Live Activity update failed for provider %s printer %s", provider_id, printer_id)
 
-    def _activity_lock(self, provider_id: int, printer_id: int) -> asyncio.Lock:
-        key = (provider_id, printer_id)
+    def _activity_lock(self, provider_id: int, recipient_id: str, printer_id: int) -> asyncio.Lock:
+        key = (provider_id, recipient_id, printer_id)
         lock = self._activity_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
@@ -359,9 +370,9 @@ class NotifyLiveActivityService:
         subtask_id = self._subtask_id(data)
         reason = data.get("failure_reason") or data.get("reason")
 
-        for provider, config in providers:
+        for provider, recipient_id, config in providers:
             provider_id = provider.id
-            activity = await self._active_activity(db, provider_id, printer_id, subtask_id=subtask_id)
+            activity = await self._active_activity(db, provider_id, recipient_id, printer_id, subtask_id=subtask_id)
             if not activity:
                 continue
             client = await self._client(config)
@@ -371,6 +382,7 @@ class NotifyLiveActivityService:
                     filename=filename or activity.filename or "Unknown print",
                     status=status,
                     reason=str(reason) if reason else None,
+                    **self._button_options(config),
                 )
                 await client.end(
                     activity.activity_id,
@@ -416,8 +428,12 @@ class NotifyLiveActivityService:
             provider = await db.get(NotificationProvider, activity.provider_id)
             if not provider or not provider.enabled:
                 continue
-            config = self._config(provider)
-            if not self._truthy(config.get("live_activities_enabled")):
+            provider_config = self._config(provider)
+            config = self._live_activity_recipient_config(provider_config, activity.recipient_id)
+            if config is None:
+                # The recipient was removed or opted out; stop tracking its tile.
+                self._mark_ended(activity)
+                await db.commit()
                 continue
 
             state = self._printer_status(activity.printer_id)
@@ -439,6 +455,7 @@ class NotifyLiveActivityService:
                         filename=activity.filename or "Unknown print",
                         status="stopped",
                         reason="Printer is no longer printing",
+                        **self._button_options(config),
                     )
                     await client.end(activity.activity_id, payload, keep_for_seconds=self._end_keep_for(config))
                     self._mark_ended(activity)
@@ -449,7 +466,7 @@ class NotifyLiveActivityService:
                     getattr(state, "subtask_name", None) or getattr(state, "current_print", None) or activity.filename
                 )
                 remaining_time = self._state_remaining_time_seconds(state)
-                progress = effective_print_progress(state)
+                progress = live_activity_progress(state)
                 layer_num = self._optional_int(getattr(state, "layer_num", None))
                 total_layers = self._optional_int(getattr(state, "total_layers", None))
                 payload = build_update_content(
@@ -519,7 +536,7 @@ class NotifyLiveActivityService:
         printers = (await db.scalars(select(Printer).where(Printer.is_active.is_(True)))).all()
         printer_by_id = {printer.id: printer for printer in printers}
         printer_ids = {printer.id for printer in printers}
-        printer_ids.update(provider.printer_id for provider, _ in providers if provider.printer_id is not None)
+        printer_ids.update(provider.printer_id for provider, _, _ in providers if provider.printer_id is not None)
 
         for printer_id in sorted(printer_ids):
             state = self._printer_status(printer_id)
@@ -527,25 +544,31 @@ class NotifyLiveActivityService:
                 continue
             printer = printer_by_id.get(printer_id)
             printer_name = getattr(printer, "name", None) or self._printer_name(printer_id)
-            for provider, config in providers:
+            for provider, recipient_id, config in providers:
                 if provider.printer_id is not None and provider.printer_id != printer_id:
                     continue
-                if await self._active_activity(db, provider.id, printer_id):
-                    continue
-                await self._start_from_state(
-                    db,
-                    provider=provider,
-                    config=config,
-                    printer_id=printer_id,
-                    printer_name=printer_name,
-                    state=state,
-                )
+                # Progress recovery can be creating this same activity while the
+                # keepalive loop runs. Share its lock and re-check after waiting
+                # so both recovery paths cannot call Notify.start().
+                async with self._activity_lock(provider.id, recipient_id, printer_id):
+                    if await self._active_activity(db, provider.id, recipient_id, printer_id):
+                        continue
+                    await self._start_from_state(
+                        db,
+                        provider=provider,
+                        recipient_id=recipient_id,
+                        config=config,
+                        printer_id=printer_id,
+                        printer_name=printer_name,
+                        state=state,
+                    )
 
     async def _start_from_state(
         self,
         db: AsyncSession,
         *,
         provider: NotificationProvider,
+        recipient_id: str,
         config: dict[str, Any],
         printer_id: int,
         printer_name: str,
@@ -553,7 +576,7 @@ class NotifyLiveActivityService:
     ) -> None:
         filename = getattr(state, "subtask_name", None) or getattr(state, "current_print", None) or "Unknown print"
         subtask_id = getattr(state, "subtask_id", None)
-        progress = effective_print_progress(state)
+        progress = live_activity_progress(state)
         remaining_time = self._state_remaining_time_seconds(state)
         layer_num = self._optional_int(getattr(state, "layer_num", None))
         total_layers = self._optional_int(getattr(state, "total_layers", None))
@@ -575,6 +598,7 @@ class NotifyLiveActivityService:
             await self._create_activity(
                 db,
                 provider_id=provider_id,
+                recipient_id=recipient_id,
                 printer_id=printer_id,
                 activity_id=activity_id,
                 subtask_id=str(subtask_id) if subtask_id else None,
@@ -603,40 +627,73 @@ class NotifyLiveActivityService:
         self,
         db: AsyncSession,
         printer_id: int,
-    ) -> list[tuple[NotificationProvider, dict[str, Any]]]:
-        providers = await self._all_enabled_live_notify_providers(db)
+    ) -> list[tuple[NotificationProvider, str, dict[str, Any]]]:
         return [
-            (provider, config)
-            for provider, config in providers
+            (provider, recipient_id, config)
+            for provider, recipient_id, config in await self._all_enabled_live_notify_providers(db)
             if provider.printer_id is None or provider.printer_id == printer_id
         ]
 
     async def _all_enabled_live_notify_providers(
         self, db: AsyncSession
-    ) -> list[tuple[NotificationProvider, dict[str, Any]]]:
+    ) -> list[tuple[NotificationProvider, str, dict[str, Any]]]:
         result = await db.scalars(
             select(NotificationProvider).where(
                 NotificationProvider.enabled.is_(True),
                 NotificationProvider.provider_type == "notify",
             )
         )
-        providers: list[tuple[NotificationProvider, dict[str, Any]]] = []
+        recipients: list[tuple[NotificationProvider, str, dict[str, Any]]] = []
         for provider in result.all():
-            config = self._config(provider)
-            if self._truthy(config.get("live_activities_enabled")):
-                providers.append((provider, config))
-        return providers
+            provider_config = self._config(provider)
+            for recipient_id, config in self._live_activity_recipients(provider_config):
+                recipients.append((provider, recipient_id, config))
+        return recipients
+
+    @classmethod
+    def _live_activity_recipients(cls, provider_config: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+        """Return effective device configs, retaining legacy single-device providers."""
+        raw_recipients = provider_config.get("recipients")
+        if not isinstance(raw_recipients, list):
+            return [("legacy", provider_config)] if cls._truthy(provider_config.get("live_activities_enabled")) else []
+
+        recipients: list[tuple[str, dict[str, Any]]] = []
+        for raw in raw_recipients:
+            if not isinstance(raw, dict) or not cls._truthy(raw.get("enabled", True)):
+                continue
+            recipient_id = str(raw.get("id") or raw.get("device_id") or "").strip()
+            if not recipient_id or not cls._truthy(raw.get("live_activities_enabled")):
+                continue
+            device_id = str(raw.get("device_id") or "").strip()
+            device_token = str(raw.get("device_token") or "").strip()
+            if not device_id or not device_token:
+                continue
+            recipients.append(
+                (recipient_id, {**provider_config, **raw, "device_id": device_id, "device_token": device_token})
+            )
+        return recipients
+
+    @classmethod
+    def _live_activity_recipient_config(
+        cls, provider_config: dict[str, Any], recipient_id: str
+    ) -> dict[str, Any] | None:
+        for candidate_id, config in cls._live_activity_recipients(provider_config):
+            if candidate_id == recipient_id:
+                return config
+        return None
 
     async def _active_activity(
         self,
         db: AsyncSession,
         provider_id: int,
+        recipient_id: str,
         printer_id: int,
         *,
         subtask_id: str | None = None,
     ) -> NotificationLiveActivity | None:
         stmt = select(NotificationLiveActivity).where(
             NotificationLiveActivity.provider_id == provider_id,
+            NotificationLiveActivity.recipient_id == recipient_id,
             NotificationLiveActivity.printer_id == printer_id,
             NotificationLiveActivity.state == "active",
         )
@@ -660,6 +717,7 @@ class NotifyLiveActivityService:
             filename=activity.filename or "Unknown print",
             status=status,
             reason="Replaced by a new print",
+            **self._button_options(provider_config),
         )
         await client.end(activity.activity_id, payload, keep_for_seconds=self._end_keep_for(provider_config))
         self._mark_ended(activity)
@@ -669,6 +727,7 @@ class NotifyLiveActivityService:
         db: AsyncSession,
         *,
         provider_id: int,
+        recipient_id: str,
         printer_id: int,
         activity_id: str,
         subtask_id: str | None,
@@ -682,6 +741,7 @@ class NotifyLiveActivityService:
         db.add(
             NotificationLiveActivity(
                 provider_id=provider_id,
+                recipient_id=recipient_id,
                 printer_id=printer_id,
                 activity_id=activity_id,
                 subtask_id=subtask_id,
@@ -890,6 +950,15 @@ class NotifyLiveActivityService:
     @staticmethod
     def _native_tile_countdown(config: dict[str, Any]) -> bool:
         return NotifyLiveActivityService._truthy(config.get("live_activity_native_tile_countdown"))
+
+    @classmethod
+    def _button_options(cls, config: dict[str, Any]) -> dict[str, str | None]:
+        if not cls._truthy(config.get("live_activity_button_enabled")):
+            return {"button_title": None, "button_url": None}
+        return {
+            "button_title": str(config.get("live_activity_button_title") or "").strip() or None,
+            "button_url": str(config.get("live_activity_button_url") or "").strip() or None,
+        }
 
     @staticmethod
     def _truthy(value: Any) -> bool:

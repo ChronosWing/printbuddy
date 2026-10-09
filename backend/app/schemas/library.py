@@ -137,6 +137,10 @@ class FileResponse(BaseModel):
 
     notes: str | None
 
+    source_type: str | None = None
+    source_url: str | None = None
+    source_snapshot_available: bool = False
+
     # Duplicate detection
     duplicates: list[FileDuplicate] | None = None
     duplicate_count: int = 0
@@ -152,6 +156,7 @@ class FileResponse(BaseModel):
     print_name: str | None = None
     print_time_seconds: int | None = None
     filament_used_grams: float | None = None
+    filament_type: str | None = None
     sliced_for_model: str | None = None
 
     class Config:
@@ -168,6 +173,8 @@ class FileListResponse(BaseModel):
     file_type: str
     file_size: int
     thumbnail_path: str | None
+    source_type: str | None = None
+    source_snapshot_available: bool = False
     print_count: int
     duplicate_count: int = 0
     # User tracking (Issue #206)
@@ -179,6 +186,7 @@ class FileListResponse(BaseModel):
     print_name: str | None = None
     print_time_seconds: int | None = None
     filament_used_grams: float | None = None
+    filament_type: str | None = None
     sliced_for_model: str | None = None
 
     class Config:

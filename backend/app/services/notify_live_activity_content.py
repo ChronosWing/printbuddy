@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from typing import Any
+from urllib.parse import urlparse
 
 _PRINTBUDDY_SYMBOL = "printer"
 _ACTIVE_COLOR = "#0a84ff"
@@ -28,6 +29,8 @@ def build_start_content(
     state: str = "running",
     compact_display: str = "progress",
     native_countdown: bool = False,
+    button_title: str | None = None,
+    button_url: str | None = None,
 ) -> dict[str, Any]:
     """Build payload for creating a Live Activity."""
     return build_update_content(
@@ -40,6 +43,8 @@ def build_start_content(
         state=state,
         compact_display=compact_display,
         native_countdown=native_countdown,
+        button_title=button_title,
+        button_url=button_url,
     )
 
 
@@ -54,6 +59,8 @@ def build_update_content(
     state: str = "running",
     compact_display: str = "progress",
     native_countdown: bool = False,
+    button_title: str | None = None,
+    button_url: str | None = None,
 ) -> dict[str, Any]:
     """Build payload for updating a Live Activity."""
     progress_value = _normalize_progress_percent(progress)
@@ -79,6 +86,7 @@ def build_update_content(
         "symbol": _PRINTBUDDY_SYMBOL,
         "tint": _ACTIVE_COLOR,
     }
+    _add_button(content, title=button_title, url=button_url)
 
     if state_key in {"pause", "paused"}:
         content["status"] = f"Paused · {percent_text}"
@@ -116,6 +124,8 @@ def build_end_content(
     filename: str,
     status: str,
     reason: str | None = None,
+    button_title: str | None = None,
+    button_url: str | None = None,
 ) -> dict[str, Any]:
     """Build payload for ending a Live Activity."""
     status_key = (status or "completed").lower()
@@ -133,7 +143,7 @@ def build_end_content(
     if reason:
         body = f"{label} · {reason}"
 
-    return {
+    content: dict[str, Any] = {
         "title": printer_name,
         "body": _job_display_name(filename) or "Unknown print",
         "status": body,
@@ -141,6 +151,18 @@ def build_end_content(
         "symbol": _PRINTBUDDY_SYMBOL,
         "tint": color,
     }
+    _add_button(content, title=button_title, url=button_url)
+    return content
+
+
+def _add_button(content: dict[str, Any], *, title: str | None, url: str | None) -> None:
+    title = str(title or "").strip()
+    url = str(url or "").strip()
+    parsed_url = urlparse(url)
+    if title and len(title) <= 20 and len(url) <= 512 and parsed_url.scheme == "https" and parsed_url.netloc:
+        # Notify defaults to firing a background POST. Printbuddy buttons are
+        # navigation actions, so ask Notify to open the configured HTTPS URL.
+        content["button"] = {"title": title, "url": url, "open": True}
 
 
 def _normalize_progress_percent(progress: float | int | None) -> float:

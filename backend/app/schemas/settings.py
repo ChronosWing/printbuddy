@@ -41,6 +41,10 @@ class AppSettings(BaseModel):
         default=False,
         description="When multiple AMS spools match, prefer the one with lowest remaining filament",
     )
+    warn_on_missing_spool_assignment: bool = Field(
+        default=True,
+        description="Ask for confirmation before starting a print on a printer with no assigned spool",
+    )
 
     # Open Filament Database catalog integration
     open_filament_database_enabled: bool = Field(
@@ -190,6 +194,14 @@ class AppSettings(BaseModel):
     library_disk_warning_gb: float = Field(
         default=5.0,
         description="Show warning when free disk space falls below this threshold (GB)",
+    )
+
+    # MakerWorld import defaults. Both remain opt-in to preserve existing import behavior.
+    makerworld_archive_details_default: bool = Field(
+        default=False, description="Archive MakerWorld description and display images by default when importing"
+    )
+    makerworld_cover_thumbnail_default: bool = Field(
+        default=False, description="Use the locally archived MakerWorld cover as the library thumbnail by default"
     )
 
     # Camera view settings
@@ -364,6 +376,7 @@ class AppSettingsUpdate(BaseModel):
     spoolman_report_partial_usage: bool | None = None
     disable_filament_warnings: bool | None = None
     prefer_lowest_filament: bool | None = None
+    warn_on_missing_spool_assignment: bool | None = None
     open_filament_database_enabled: bool | None = None
     check_updates: bool | None = None
     check_printer_firmware: bool | None = None
@@ -423,6 +436,8 @@ class AppSettingsUpdate(BaseModel):
     prometheus_token: str | None = None
     low_stock_threshold: float | None = Field(default=None, ge=0.1, le=99.9)
     user_notifications_enabled: bool | None = None
+    makerworld_archive_details_default: bool | None = None
+    makerworld_cover_thumbnail_default: bool | None = None
     default_bed_levelling: bool | None = None
     default_flow_cali: bool | None = None
     default_vibration_cali: bool | None = None
