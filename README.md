@@ -1,4 +1,3 @@
-# Printbuddy
 
 <p align="center">
   <!-- Replace this with your logo path once added to the repository -->
@@ -14,7 +13,9 @@
 </p>
 
 <p align="center">
-  <a href="https://wiki.printbuddy.tech">📚 Wiki</a>
+  <a href="https://www.printbuddy.tech">🌎 Website</a>
+  .
+  <a href="https://www.printbuddy.tech/wiki-en">📚 Wiki</a>
   ·
   <a href="https://github.com/vmhomelab/Printbuddy/releases/latest">📦 Latest release</a>
   ·
@@ -24,20 +25,6 @@
 
 <p align="center">
   Demo login: <code>admin</code> / <code>printbuddy</code>
-</p>
-
-<p align="center">
-  <a href="#docker-quick-start">Quick Start</a>
-  ·
-  <a href="#printer-provider-direction">Providers</a>
-  ·
-  <a href="#home-assistant">Home Assistant</a>
-  ·
-  <a href="#screenshots">Screenshots</a>
-  ·
-  <a href="#printbuddy-mascot--stl">Printbuddy STL</a>
-  ·
-  <a href="#development-setup">Development</a>
 </p>
 
 ---
