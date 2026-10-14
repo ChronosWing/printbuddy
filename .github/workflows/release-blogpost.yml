@@ -3,6 +3,7 @@ name: Release → Blogpost
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   notify-n8n:
