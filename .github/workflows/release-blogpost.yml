@@ -12,5 +12,6 @@ jobs:
       - name: Trigger n8n workflow
         run: |
           curl -fsS -X POST "https://n8n.vmhomelab.de/webhook/github-release-blogpost" \
+            -H "Authorization: Bearer ${{ secrets.N8N_WEBHOOK_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{"tag": "${{ github.event.release.tag_name }}", "repo": "${{ github.repository }}"}'
