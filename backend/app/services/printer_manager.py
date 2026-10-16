@@ -14,6 +14,26 @@ from backend.app.services.printer_providers.factory import create_printer_client
 
 logger = logging.getLogger(__name__)
 
+
+def reported_nozzle_temperatures(temperatures: dict[str, object]) -> tuple[tuple[int, object], ...]:
+    """Return direct nozzle readings in stable physical-nozzle order.
+
+    Provider state uses ``nozzle`` for the first toolhead and ``nozzle_N`` for
+    subsequent toolheads. Targets and heating flags deliberately do not match,
+    so callers can safely use this for live-change de-duplication, persistence,
+    safety checks, and metric labels.
+    """
+
+    nozzles: list[tuple[int, object]] = []
+    for key, value in temperatures.items():
+        if key == "nozzle":
+            nozzles.append((1, value))
+            continue
+        if key.startswith("nozzle_") and key[7:].isdigit():
+            nozzles.append((int(key[7:]), value))
+    return tuple(sorted(nozzles))
+
+
 # Replacing a client can synchronously wait for its network thread. Keep that
 # teardown bounded so a failed device connection cannot freeze the API loop.
 REPLACEMENT_DISCONNECT_TIMEOUT_SECONDS = 2.0
@@ -592,10 +612,9 @@ class PrinterManager:
                 logger.warning("Printer %s disconnected during cooldown wait", printer_id)
                 return False
 
-            # Check nozzle temperature (and nozzle_2 for dual extruders)
-            nozzle_temp = state.temperatures.get("nozzle", 0)
-            nozzle_2_temp = state.temperatures.get("nozzle_2", 0)
-            max_temp = max(nozzle_temp, nozzle_2_temp)
+            # A printer is only safe after every reported toolhead is cool.
+            nozzle_temperatures = [float(value) for _index, value in reported_nozzle_temperatures(state.temperatures)]
+            max_temp = max(nozzle_temperatures, default=0)
 
             if max_temp <= target_temp:
                 logger.info("Printer %s cooled down to %s°C", printer_id, max_temp)

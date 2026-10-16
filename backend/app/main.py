@@ -104,6 +104,7 @@ from backend.app.services.printer_manager import (
     parse_plate_id,
     printer_manager,
     printer_state_to_dict,
+    reported_nozzle_temperatures,
 )
 from backend.app.services.smart_plug_manager import smart_plug_manager
 from backend.app.services.spool_assignment_notifications import (
@@ -1324,26 +1325,44 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
     # Only broadcast if something meaningful changed (reduce WebSocket spam)
     # Include rounded temperatures to detect meaningful temp changes (within 1 degree)
     temps = state.temperatures or {}
-    nozzle_temp = round(temps.get("nozzle", 0))
+    nozzle_temperatures = tuple(
+        (
+            index,
+            round(float(value)),
+            round(float(temps.get(f"nozzle{'_' + str(index) if index > 1 else ''}_target", 0))),
+        )
+        for index, value in reported_nozzle_temperatures(temps)
+    )
     bed_temp = round(temps.get("bed", 0))
-    nozzle_2_temp = round(temps.get("nozzle_2", 0)) if "nozzle_2" in temps else ""
     chamber_temp = round(temps.get("chamber", 0)) if "chamber" in temps else ""
 
-    # Auto-detect dual-nozzle printers from MQTT temperature data
-    if "nozzle_2" in temps and printer_id not in _nozzle_count_updated:
-        _nozzle_count_updated.add(printer_id)
-        # Update nozzle_count in database
-        async with async_session() as db:
-            from backend.app.models.printer import Printer
+    # Persist the actual number of reported toolheads. This keeps dual-nozzle
+    # Bambu behavior intact while allowing U1-style four-nozzle printers (and
+    # future Moonraker providers) to expose their real capability count.
+    nozzle_count = max((index for index, _value, _target in nozzle_temperatures), default=1)
+    if nozzle_count > 1 and printer_id not in _nozzle_count_updated:
+        try:
+            async with async_session() as db:
+                from backend.app.models.printer import Printer
 
-            result = await db.execute(select(Printer).where(Printer.id == printer_id))
-            printer = result.scalar_one_or_none()
-            if printer and printer.nozzle_count != 2:
-                printer.nozzle_count = 2
-                await db.commit()
-                logging.getLogger(__name__).info(
-                    f"Auto-detected dual-nozzle printer {printer_id}, updated nozzle_count=2"
-                )
+                result = await db.execute(select(Printer).where(Printer.id == printer_id))
+                printer = result.scalar_one_or_none()
+                if printer and printer.nozzle_count != nozzle_count:
+                    printer.nozzle_count = nozzle_count
+                    await db.commit()
+                    logging.getLogger(__name__).info(
+                        "Auto-detected %s-nozzle printer %s, updated nozzle_count=%s",
+                        nozzle_count,
+                        printer_id,
+                        nozzle_count,
+                    )
+            _nozzle_count_updated.add(printer_id)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Could not persist auto-detected nozzle count for printer %s; will retry on the next status update",
+                printer_id,
+                exc_info=True,
+            )
 
     # Include target temps for heating phase detection
     bed_target = round(temps.get("bed_target", 0))
@@ -1378,7 +1397,7 @@ async def on_printer_status_change(printer_id: int, state: PrinterState):
     )
     status_key = (
         f"{state.connected}:{state.state}:{state.progress}:{state.layer_num}:"
-        f"{nozzle_temp}:{bed_temp}:{nozzle_2_temp}:{chamber_temp}:"
+        f"{nozzle_temperatures}:{bed_temp}:{chamber_temp}:"
         f"{state.stg_cur}:{bed_target}:{nozzle_target}:"
         f"{state.cooling_fan_speed}:{state.big_fan1_speed}:{state.big_fan2_speed}:"
         f"{state.chamber_light}:{state.active_extruder}:{state.tray_now}:{vt_tray_key}:"
