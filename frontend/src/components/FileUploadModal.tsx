@@ -41,6 +41,10 @@ interface FileUploadModalProps {
   onUploadComplete: (succeededCount?: number) => void;
   /** Called after each file is successfully uploaded with its response data. Return a string to show an error and prevent modal from closing. */
   onFileUploaded?: (file: LibraryFileUploadResponse) => string | void;
+  /** Called only after a direct printer upload succeeds. */
+  onPrinterFileUploaded?: (file: { path: string; filename: string }) => void;
+  /** Limit selection to one file when upload leads to a single-file print dialog. */
+  singleFile?: boolean;
   /** When true, automatically uploads the file as soon as it's added and closes the modal */
   autoUpload?: boolean;
   /** Validate files before adding. Return a string to reject with an error message. */
@@ -65,7 +69,7 @@ interface FileUploadModalProps {
   allowStartPrintAfterUpload?: boolean;
 }
 
-export function FileUploadModal({ folderId, onClose, onUploadComplete, onFileUploaded, autoUpload, validateFile, accept, acceptedFileDescription, uploadTargetPrinterId, directPrinterUploadId, directPrinterProvider, directPrinterModel, directPrinterUploadPath = '/', directPrinterUploadOverwrite = false, uploadNotice, allowStartPrintAfterUpload = false }: FileUploadModalProps) {
+export function FileUploadModal({ folderId, onClose, onUploadComplete, onFileUploaded, onPrinterFileUploaded, singleFile = false, autoUpload, validateFile, accept, acceptedFileDescription, uploadTargetPrinterId, directPrinterUploadId, directPrinterProvider, directPrinterModel, directPrinterUploadPath = '/', directPrinterUploadOverwrite = false, uploadNotice, allowStartPrintAfterUpload = false }: FileUploadModalProps) {
   const { t } = useTranslation();
   const [files, setFiles] = useState<UploadFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -164,6 +168,7 @@ export function FileUploadModal({ folderId, onClose, onUploadComplete, onFileUpl
           }
           updateFileStatus(uf.file, { status: 'success' });
           succeededCount += 1;
+          onPrinterFileUploaded?.(uploaded);
         } else {
           const result = await api.uploadLibraryFile(uf.file, folderId, generateStlThumbnails, uploadTargetPrinterId);
           updateFileStatus(uf.file, { status: 'success' });
@@ -201,6 +206,10 @@ export function FileUploadModal({ folderId, onClose, onUploadComplete, onFileUpl
 
   const addFiles = (newFiles: File[]) => {
     setUploadError(null);
+    if (singleFile && (newFiles.length !== 1 || files.some((file) => file.status === 'pending'))) {
+      setUploadError('Select one G-code file at a time.');
+      return;
+    }
     if (validateFile) {
       for (const file of newFiles) {
         const error = validateFile(file);
@@ -277,7 +286,7 @@ export function FileUploadModal({ folderId, onClose, onUploadComplete, onFileUpl
           <input
             ref={fileInputRef}
             type="file"
-            multiple
+            multiple={!singleFile}
             accept={accept}
             className="hidden"
             onChange={handleFileSelect}

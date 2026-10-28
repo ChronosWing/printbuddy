@@ -1962,6 +1962,7 @@ function PrinterCard({
   const [showDiagnostic, setShowDiagnostic] = useState(false);
   const closePrinterInfo = useCallback(() => setShowPrinterInfo(false), []);
   const [printAfterUpload, setPrintAfterUpload] = useState<{ id: number; filename: string } | null>(null);
+  const [u1PrintAfterUpload, setU1PrintAfterUpload] = useState<{ path: string; filename: string } | null>(null);
   const openPrusaDirectUpload = useCallback(() => {
     setDroppedPrusaFile(null);
     setShowUploadForPrint(false);
@@ -5870,7 +5871,7 @@ function PrinterCard({
                   {(isBambuProvider || isElegooSDCPProvider || isSnapmakerU1Provider) && !isPrusaModelPrinter && (
                     <Button
                       size="sm"
-                      onClick={() => isSnapmakerU1Provider ? setShowFileManager(true) : setShowUploadForPrint(true)}
+                      onClick={() => setShowUploadForPrint(true)}
                       disabled={!hasPermission('printers:control')}
                       title={!hasPermission('printers:control') ? t('printers.permission.noControl') : t('common.print')}
                       className="!bg-bambu-green hover:!bg-bambu-green/80 !text-white"
@@ -5938,7 +5939,24 @@ function PrinterCard({
       )}
 
       {/* Upload for Print Modal */}
-      {showUploadForPrint && (
+      {showUploadForPrint && isSnapmakerU1Provider && (
+        <FileUploadModal
+          folderId={null}
+          onClose={() => setShowUploadForPrint(false)}
+          onUploadComplete={(succeededCount = 0) => {
+            if (succeededCount > 0) queryClient.invalidateQueries({ queryKey: ['printerFiles', printer.id] });
+          }}
+          directPrinterUploadId={printer.id}
+          directPrinterProvider={printer.provider}
+          directPrinterModel={printer.model}
+          accept=".gcode"
+          acceptedFileDescription="Snapmaker U1 G-code files (.gcode)"
+          singleFile
+          validateFile={(file) => file.name.toLowerCase().endsWith('.gcode') ? undefined : 'Select a .gcode file for the Snapmaker U1.'}
+          onPrinterFileUploaded={(uploaded) => setU1PrintAfterUpload({ path: uploaded.path, filename: uploaded.filename })}
+        />
+      )}
+      {showUploadForPrint && !isSnapmakerU1Provider && (
         <FileUploadModal
           folderId={null}
           onClose={() => setShowUploadForPrint(false)}
@@ -6004,6 +6022,17 @@ function PrinterCard({
           onClose={() => setPrintAfterUpload(null)}
           onSuccess={() => setPrintAfterUpload(null)}
           cleanupLibraryAfterDispatch
+        />
+      )}
+
+      {u1PrintAfterUpload && (
+        <PrintModal
+          mode="reprint"
+          archiveName={u1PrintAfterUpload.filename}
+          initialSelectedPrinterIds={[printer.id]}
+          u1PrinterFile={{ printerId: printer.id, path: u1PrintAfterUpload.path, storage: 'gcodes' }}
+          onClose={() => setU1PrintAfterUpload(null)}
+          onSuccess={() => setU1PrintAfterUpload(null)}
         />
       )}
 

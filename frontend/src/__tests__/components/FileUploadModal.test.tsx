@@ -684,6 +684,31 @@ describe('FileUploadModal', () => {
       expect(defaultProps.onClose).toHaveBeenCalled();
     });
 
+    it('hands a successful U1 upload to print setup without starting it', async () => {
+      const user = userEvent.setup();
+      const onPrinterFileUploaded = vi.fn();
+      const start = vi.fn(() => HttpResponse.json({ status: 'started' }));
+      server.use(
+        http.get('/api/v1/printers/7/files', () => HttpResponse.json({ path: '/', files: [] })),
+        http.post('/api/v1/printers/7/files/upload', () => HttpResponse.json({
+          status: 'uploaded', path: 'parts/U1 bracket.gcode', filename: 'U1 bracket.gcode',
+        })),
+        http.post('/api/v1/printers/7/files/start', start),
+      );
+
+      render(<FileUploadModal {...defaultProps} directPrinterUploadId={7} accept=".gcode" singleFile onPrinterFileUploaded={onPrinterFileUploaded} />);
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      expect(fileInput).not.toHaveAttribute('multiple');
+      await user.upload(fileInput, new File(['G28'], 'U1 bracket.gcode', { type: 'text/plain' }));
+      await user.click(screen.getByRole('button', { name: /Upload \(1\)/i }));
+
+      await waitFor(() => expect(onPrinterFileUploaded).toHaveBeenCalledWith(expect.objectContaining({
+        path: 'parts/U1 bracket.gcode', filename: 'U1 bracket.gcode',
+      })));
+      expect(start).not.toHaveBeenCalled();
+      expect(defaultProps.onClose).toHaveBeenCalled();
+    });
+
     it('starts printing the direct printer upload with Elegoo CC1 start options when requested', async () => {
       const user = userEvent.setup();
       let seenStartPath: string | null = null;

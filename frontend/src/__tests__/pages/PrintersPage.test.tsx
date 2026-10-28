@@ -502,6 +502,52 @@ describe('PrintersPage', () => {
       expect(screen.getAllByText('K2 Plus').length).toBeGreaterThan(0);
     });
 
+    it('opens U1 Upload Files from Print and reviews the uploaded G-code without starting', async () => {
+      const user = userEvent.setup();
+      const start = vi.fn(() => HttpResponse.json({ status: 'started' }));
+      server.use(
+        http.get('/api/v1/printers/', () => HttpResponse.json([{
+          ...mockPrinters[0], id: 9, name: 'U1', provider: 'fluidd', model: 'Snapmaker U1',
+        }])),
+        http.get('/api/v1/printers/9/status', () => HttpResponse.json({
+          ...mockPrinterStatus,
+          ams: [{ id: 0, module_type: 'snapmaker_u1', tray: [
+            { id: 0, filament_detected: true, tray_type: 'PETG', tray_color: '0000FFFF' },
+            { id: 1, filament_detected: true, tray_type: 'PLA', tray_color: 'FF0000FF' },
+          ] }],
+        })),
+        http.get('/api/v1/printers/9/files', () => HttpResponse.json({ path: '/', files: [] })),
+        http.post('/api/v1/printers/9/files/upload', () => HttpResponse.json({
+          status: 'uploaded', path: 'U1 bracket.gcode', filename: 'U1 bracket.gcode',
+        })),
+        http.get('/api/v1/printers/9/files/metadata', () => HttpResponse.json({
+          metadata: { estimated_time: 1800, filament_weight_total: 5, filament_weights: [5, 0, 0, 0], filament_type: ['PLA'], filament_color: ['#FF0000'] },
+          used_tools: [0],
+        })),
+        http.post('/api/v1/printers/9/files/start', start),
+      );
+
+      render(<PrintersPage />);
+      await screen.findAllByText('U1');
+      await user.click(screen.getByRole('button', { name: 'L' }));
+      await user.click(screen.getByRole('button', { name: 'Print' }));
+      expect(await screen.findByText('Upload Files')).toBeInTheDocument();
+      expect(screen.queryByText('File Manager')).not.toBeInTheDocument();
+      const fileInput = document.querySelector('input[type="file"]') as HTMLInputElement;
+      expect(fileInput).toHaveAttribute('accept', '.gcode');
+      await user.upload(fileInput, new File(['G28'], 'U1 bracket.gcode', { type: 'text/plain' }));
+      await user.click(screen.getByRole('button', { name: /Upload \(1\)/i }));
+
+      expect(await screen.findByText('Print on Snapmaker U1')).toBeInTheDocument();
+      expect(await screen.findByText('Sliced filament · T0')).toBeInTheDocument();
+      const toolhead = screen.getByRole('combobox', { name: 'Physical toolhead for logical T0' });
+      expect(toolhead).toHaveValue('1');
+      expect(screen.getByText(/5\.00 g estimated/)).toBeInTheDocument();
+      await user.selectOptions(toolhead, '0');
+      expect(screen.getByText(/Material mismatch: sliced PLA, loaded PETG/)).toBeInTheDocument();
+      expect(start).not.toHaveBeenCalled();
+    });
+
     it('shows a PrusaLink badge that opens the printer UI in a new tab', async () => {
       server.use(
         http.get('/api/v1/printers/', () => HttpResponse.json([{
