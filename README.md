@@ -33,7 +33,7 @@ This community fork builds on the original [PrintBuddy by vmhomelab](https://git
   .
   <a href="https://www.printbuddy.tech/wiki-en">📚 Wiki</a>
   ·
-  <a href="https://github.com/vmhomelab/Printbuddy/releases/latest">📦 Latest release</a>
+  <a href="https://github.com/ChronosWing/printbuddy/releases/latest">📦 Latest release</a>
   ·
   <a href="https://demo.printbuddy.tech">🚀 Demo</a>
   .

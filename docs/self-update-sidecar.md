@@ -41,7 +41,7 @@ services:
       - UPDATER_TOKEN=${PRINTBUDDY_UPDATER_TOKEN}
 
   printbuddy-updater:
-    image: docker.io/vmhomelabde/printbuddy-updater:latest
+    image: ghcr.io/chronoswing/printbuddy-updater:latest
     container_name: printbuddy-updater
     network_mode: host
     volumes:
@@ -52,7 +52,7 @@ services:
       - PRINTBUDDY_COMPOSE_FILE=/host/docker-compose.yml
       - PRINTBUDDY_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME:-printbuddy}
       - PRINTBUDDY_SERVICE_NAME=printbuddy
-      - PRINTBUDDY_ALLOWED_IMAGE=docker.io/vmhomelabde/printbuddy
+      - PRINTBUDDY_ALLOWED_IMAGE=ghcr.io/chronoswing/printbuddy
       - PRINTBUDDY_UPDATER_PORT=8787
     restart: unless-stopped
 ```
@@ -78,12 +78,12 @@ When the in-app update checker selected a specific release tag, including a beta
 
 ```bash
 docker compose -p "$PRINTBUDDY_COMPOSE_PROJECT" -f "$PRINTBUDDY_COMPOSE_FILE" config --format json
-docker pull "docker.io/vmhomelabde/printbuddy:<selected-release-tag>"
-docker tag "docker.io/vmhomelabde/printbuddy:<selected-release-tag>" "<image declared by the compose service>"
+docker pull "ghcr.io/chronoswing/printbuddy:<selected-release-tag>"
+docker tag "ghcr.io/chronoswing/printbuddy:<selected-release-tag>" "<image declared by the compose service>"
 docker compose -p "$PRINTBUDDY_COMPOSE_PROJECT" -f "$PRINTBUDDY_COMPOSE_FILE" up -d --force-recreate "$PRINTBUDDY_SERVICE_NAME"
 ```
 
-That extra retag step is intentional: it lets a compose file that tracks `docker.io/vmhomelabde/printbuddy:latest` install an explicitly selected beta release without rewriting the mounted compose file.
+That extra retag step is intentional: it lets a compose file that tracks `ghcr.io/chronoswing/printbuddy:latest` install an explicitly selected release without rewriting the mounted compose file.
 
 ## Troubleshooting
 

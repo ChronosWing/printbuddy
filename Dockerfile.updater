@@ -1,5 +1,8 @@
 FROM python:3.12-slim
 
+LABEL org.opencontainers.image.source="https://github.com/ChronosWing/printbuddy" \
+      org.opencontainers.image.licenses="AGPL-3.0"
+
 ARG TARGETARCH
 
 RUN apt-get update \

@@ -1,9 +1,9 @@
 services:
   printbuddy:
-    image: docker.io/vmhomelabde/printbuddy:latest
+    image: ghcr.io/chronoswing/printbuddy:latest
     build: .
     # Usage:
-    #   docker compose up -d          → pulls pre-built image from Docker Hub
+    #   docker compose up -d          → pulls the pre-built image from GHCR
     #   docker compose up -d --build  → builds locally from source
     container_name: printbuddy
     # File ownership inside the data and logs volumes is normalised by the
@@ -140,7 +140,7 @@ services:
   # Docker socket access; Printbuddy talks to it over localhost with a shared
   # bearer token.
   #printbuddy-updater:
-  #  image: docker.io/vmhomelabde/printbuddy-updater:latest
+  #  image: ghcr.io/chronoswing/printbuddy-updater:latest
   #  container_name: printbuddy-updater
   #  network_mode: host
   #  volumes:
@@ -151,7 +151,7 @@ services:
   #    - PRINTBUDDY_COMPOSE_FILE=/host/docker-compose.yml
   #    - PRINTBUDDY_COMPOSE_PROJECT=${COMPOSE_PROJECT_NAME:-printbuddy}
   #    - PRINTBUDDY_SERVICE_NAME=printbuddy
-  #    - PRINTBUDDY_ALLOWED_IMAGE=docker.io/vmhomelabde/printbuddy
+  #    - PRINTBUDDY_ALLOWED_IMAGE=ghcr.io/chronoswing/printbuddy
   #    - PRINTBUDDY_UPDATER_PORT=8787
   #  restart: unless-stopped
 

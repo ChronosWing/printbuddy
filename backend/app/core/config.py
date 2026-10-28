@@ -6,8 +6,8 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 
 # Application version - single source of truth
-APP_VERSION = "0.2.5.3"
-GITHUB_REPO = "vmhomelab/Printbuddy"
+APP_VERSION = "0.2.5.4"
+GITHUB_REPO = "ChronosWing/printbuddy"
 
 # App directory - where the application is installed (for static files)
 _app_dir = Path(__file__).resolve().parent.parent.parent.parent

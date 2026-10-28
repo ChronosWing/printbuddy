@@ -1,7 +1,7 @@
 name: Docker GHCR preview
 
 # Build and push a single-arch preview image to GHCR for branch testing.
-# Not used for production releases (see docker-publish.yml → Docker Hub).
+# Not used for this fork's production releases (see docker-publish-fork.yml).
 
 on:
   workflow_dispatch:

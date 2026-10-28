@@ -15,7 +15,7 @@ class TestUpdatesAPI:
         assert response.status_code == 200
         result = response.json()
         assert result["version"]
-        assert result["repo"] == "vmhomelab/Printbuddy"
+        assert result["repo"] == "ChronosWing/printbuddy"
         assert result["source_ref"] == "1a593e7b9440ce692cf7eddb8006d8f45add755f"
         assert result["source_ref_short"] == "1a593e7"
         assert result["display_version"].endswith("(1a593e7)")
@@ -149,7 +149,7 @@ class TestUpdatesAPI:
 
         assert response.status_code == 200
         assert response.json()["job_id"] == "upd_1"
-        assert posted_json == {"target_image": "docker.io/vmhomelabde/printbuddy:v0.2.5.1b13"}
+        assert posted_json == {"target_image": "ghcr.io/chronoswing/printbuddy:v0.2.5.1b13"}
 
     @pytest.mark.asyncio
     async def test_self_update_job_status_proxies_updater(self, async_client: AsyncClient):
@@ -501,7 +501,7 @@ class TestUpdatesAPI:
     @pytest.mark.asyncio
     async def test_perform_update_preserves_ssh_origin_when_pointing_at_correct_repo(self, tmp_path):
         """Regression for the developer-checkout footgun: if origin already
-        points at github.com/vmhomelab/Printbuddy via SSH, the updater must
+        points at github.com/ChronosWing/printbuddy via SSH, the updater must
         leave it alone instead of clobbering it with HTTPS. Pre-fix, every
         Apply Update click rewrote `git@github.com:...` to `https://...`,
         breaking subsequent `git push` for any developer testing the
@@ -523,7 +523,7 @@ class TestUpdatesAPI:
             # SSH URL. Every other subprocess returns successfully with no
             # output.
             if "get-url" in args and "origin" in args:
-                proc.communicate = AsyncMock(return_value=(b"git@github.com:vmhomelab/Printbuddy.git\n", b""))
+                proc.communicate = AsyncMock(return_value=(b"git@github.com:ChronosWing/printbuddy.git\n", b""))
             else:
                 proc.communicate = AsyncMock(return_value=(b"", b""))
             proc.returncode = 0

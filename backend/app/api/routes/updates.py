@@ -867,7 +867,7 @@ async def start_self_update(
     target_ref = await _discover_target_release(db)
     payload = None
     if target_ref:
-        payload = {"target_image": f"docker.io/vmhomelabde/printbuddy:{target_ref}"}
+        payload = {"target_image": f"ghcr.io/{GITHUB_REPO.lower()}:{target_ref}"}
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(

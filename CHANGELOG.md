@@ -3,6 +3,15 @@
 All notable Printbuddy changes are documented in the Printbuddy section below.
 The historical upstream changelog is preserved after that section for fork/upstream context only; inherited entries describe upstream releases and should not be read as Printbuddy release claims.
 
+## ChronosWing fork
+
+### 0.2.5.4 — Snapmaker U1 enhanced release
+
+- Added Snapmaker U1 print initiation from uploaded or already-stored G-code, with automatic and manual four-toolhead filament mapping, print-option review, and confirmation before starting.
+- Added U1 chamber light control, Moonraker file management, OrcaSlicer print metadata and thumbnails, and persistent archive thumbnails.
+- Added four-toolhead filament monitoring and firmware-backed Spoolman inventory and consumption tracking, while retaining existing Bambu printer support.
+- U1 functionality was tested with paxx12 Extended Firmware. Compatibility with unmodified stock firmware is not established; Top Cover and circulation controls are not implemented.
+
 ## Printbuddy
 
 ### Unreleased

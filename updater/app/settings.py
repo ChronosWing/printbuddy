@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     compose_file: Path = Field(default=Path("/host/docker-compose.yml"), validation_alias="PRINTBUDDY_COMPOSE_FILE")
     compose_project: str = Field(default="printbuddy", validation_alias="PRINTBUDDY_COMPOSE_PROJECT")
     service_name: str = Field(default="printbuddy", validation_alias="PRINTBUDDY_SERVICE_NAME")
-    allowed_image: str = Field(default="docker.io/vmhomelabde/printbuddy", validation_alias="PRINTBUDDY_ALLOWED_IMAGE")
+    allowed_image: str = Field(default="ghcr.io/chronoswing/printbuddy", validation_alias="PRINTBUDDY_ALLOWED_IMAGE")
     updater_port: int = Field(default=8787, validation_alias="PRINTBUDDY_UPDATER_PORT")
     command_timeout_seconds: int = Field(default=600, validation_alias="PRINTBUDDY_UPDATE_TIMEOUT_SECONDS")
 

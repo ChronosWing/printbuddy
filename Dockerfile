@@ -21,7 +21,7 @@ ENV PRINTBUDDY_REF=${PRINTBUDDY_REF}
 
 LABEL org.opencontainers.image.title="Printbuddy" \
       org.opencontainers.image.description="Self-hosted printer management for Bambu Lab, Klipper, and Mainsail/Moonraker printers" \
-      org.opencontainers.image.source="https://github.com/vmhomelab/Printbuddy" \
+      org.opencontainers.image.source="https://github.com/ChronosWing/printbuddy" \
       org.opencontainers.image.licenses="AGPL-3.0"
 
 WORKDIR /app
