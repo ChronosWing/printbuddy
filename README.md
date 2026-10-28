@@ -4,13 +4,14 @@ This community fork builds on the original [PrintBuddy by vmhomelab](https://git
 
 ### Snapmaker U1 improvements
 
-- Accurate filament materials, colors, loaded states, and assignments across all four U1 toolheads.
-- Native Spoolman inventory through Moonraker, including remaining filament weights and guards against duplicate filament deductions.
-- OrcaSlicer print metadata with estimated time, layer count, and per-toolhead filament estimates.
-- Moonraker thumbnail retrieval and persistent archive thumbnails, even after the G-code is removed from the printer.
-- U1 G-code browsing and deletion through Moonraker, plus U1-specific filament editing.
+- Moonraker/Klipper connectivity and printer monitoring with paxx12 Extended Firmware.
+- Direct `.gcode` upload to the U1 from PrintBuddy, followed by filament mapping, print-option review, and an explicit confirmation before printing. G-code already on the printer can also be printed from File Manager.
+- Filament colors, materials, loaded states, and assignments for all four toolheads. PrintBuddy matches sliced filament slots (T0–T3) to loaded toolheads by material and color when possible, with manual mapping and mismatch warnings.
+- Print options for automatic bed leveling, dynamic flow calibration with selected toolheads, and timelapse; chamber light control.
+- U1 G-code browsing and deletion through Moonraker, plus filament editing. OrcaSlicer G-code metadata provides estimated print time, layer count, and per-toolhead filament usage; Moonraker thumbnails remain in PrintBuddy archives after printer files are removed.
+- Native Spoolman inventory through the U1 firmware, including remaining filament weights and native consumption tracking without duplicate PrintBuddy deductions.
 
-**Current U1 limitations:** Starting prints directly from PrintBuddy and U1 lighting controls are not yet implemented.
+**Current U1 limitations:** These enhancements have been developed and tested with paxx12 Extended Firmware; compatibility with unmodified stock firmware is not established. Top Cover and internal/external circulation controls are not implemented. Features available on the U1 should not be assumed to work on every Moonraker/Klipper printer.
 
 ---
 
@@ -68,7 +69,7 @@ Current state:
 - Initial fork setup on `dev`
 - Bambu Lab support from the original foundation ✅
 - Prusa support added via PrusaLink ✅(Prusa Connect not tested)
-- Klipper (open fimrware) support being added ⌛ (not officially supported yet)
+- Moonraker-backed Klipper support for compatible printers ✅ (U1-specific capabilities are listed above)
 - Provider architecture in progress ⌛
 
 ---
@@ -265,7 +266,7 @@ Printbuddy is currently focused on:
 
 - Cleaning up the project structure
 - Adding provider metadata
-- Preparing Klipper and Prusa support
+- Improving Moonraker/Klipper and Prusa support
 - Keeping existing Bambu functionality working during the transition
 
 ---
