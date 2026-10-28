@@ -45,7 +45,12 @@ import { DEFAULT_PRINT_OPTIONS, DEFAULT_SCHEDULE_OPTIONS } from './types';
  * Both archiveId and libraryFileId are supported. Library files can be printed immediately
  * or added to queue (archive is created at print start time, not when queued).
  */
-export function PrintModal({
+export function PrintModal(props: PrintModalProps) {
+  if (props.u1PrinterFile) return <U1PrinterFilePrintModal {...props} file={props.u1PrinterFile} />;
+  return <StandardPrintModal {...props} />;
+}
+
+function StandardPrintModal({
   mode,
   archiveId,
   libraryFileId,
@@ -1300,6 +1305,147 @@ export function PrintModal({
           onCancel={() => setMissingSpoolConfirmationPending(false)}
         />
       )}
+    </div>
+  );
+}
+
+function U1PrinterFilePrintModal({ file, archiveName, onClose, onSuccess }: PrintModalProps & {
+  file: { printerId: number; path: string; storage?: string | null };
+}) {
+  const { showToast } = useToast();
+  const queryClient = useQueryClient();
+  const [mapping, setMapping] = useState<Record<number, number>>({});
+  const [options, setOptions] = useState<PrintOptions>({ ...DEFAULT_PRINT_OPTIONS, vibration_cali: false });
+  const [flowExtruders, setFlowExtruders] = useState<number[]>([]);
+  const [confirming, setConfirming] = useState(false);
+  const [thumbnailFailed, setThumbnailFailed] = useState(false);
+  const defaultsApplied = useRef(false);
+  const { data: settings } = useQuery({ queryKey: ['settings'], queryFn: api.getSettings });
+  const { data: status } = useQuery({
+    queryKey: ['printer-status', file.printerId],
+    queryFn: () => api.getPrinterStatus(file.printerId),
+  });
+  const { data: fileData, isLoading, error } = useQuery({
+    queryKey: ['u1-file-metadata', file.printerId, file.path],
+    queryFn: () => api.getU1PrinterFileMetadata(file.printerId, file.path),
+    retry: false,
+  });
+  useEffect(() => {
+    if (!settings || defaultsApplied.current) return;
+    defaultsApplied.current = true;
+    setOptions((current) => ({
+      ...current,
+      bed_levelling: settings.default_bed_levelling ?? true,
+      flow_cali: settings.default_flow_cali ?? false,
+      timelapse: settings.default_timelapse ?? false,
+    }));
+  }, [settings]);
+
+  const metadata = fileData?.metadata ?? {};
+  const usedTools = (fileData?.used_tools ?? []).filter((index) => Number.isInteger(index) && index >= 0 && index < 4);
+  const trays = status?.ams?.find((unit) => unit.module_type === 'snapmaker_u1')?.tray ?? [];
+  const physicalFor = (logical: number) => mapping[logical] ?? logical;
+  const selectedPhysical = usedTools.map(physicalFor);
+  const weights = Array.isArray(metadata.filament_weights) ? metadata.filament_weights : [];
+  const types = Array.isArray(metadata.filament_type) ? metadata.filament_type :
+    (Array.isArray(metadata.filament_types) ? metadata.filament_types : []);
+  const colors = Array.isArray(metadata.filament_color) ? metadata.filament_color :
+    (Array.isArray(metadata.filament_colors) ? metadata.filament_colors :
+      (Array.isArray(metadata.default_filament_colour) ? metadata.default_filament_colour : []));
+  const estimatedTime = typeof metadata.estimated_time === 'number' ? metadata.estimated_time : null;
+  const totalWeight = typeof metadata.filament_weight_total === 'number' ? metadata.filament_weight_total : null;
+  const hasDuplicateMapping = new Set(selectedPhysical).size !== selectedPhysical.length;
+  const unloadedTools = selectedPhysical.filter((index) => !trays.find((tray) => tray.id === index)?.filament_detected);
+  const mappedTools = [...new Set(selectedPhysical)];
+  const canPrint = !isLoading && !error && usedTools.length > 0 && status?.connected &&
+    !['RUNNING', 'PAUSE'].includes(status.state ?? '') && !hasDuplicateMapping && unloadedTools.length === 0 &&
+    (!options.flow_cali || (flowExtruders.length > 0 && flowExtruders.every((index) => mappedTools.includes(index))));
+
+  const startMutation = useMutation({
+    mutationFn: () => api.startPrinterFile(file.printerId, file.path, {
+      storage: file.storage,
+      bed_levelling: options.bed_levelling,
+      u1_map_table: usedTools.map((logical) => [logical, physicalFor(logical)]),
+      flow_calibrate: options.flow_cali,
+      flow_calibrate_extruders: options.flow_cali ? flowExtruders : [],
+      time_lapse_camera: options.timelapse,
+    }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['printer-status', file.printerId] });
+      showToast(`Started ${archiveName} on U1`);
+      onSuccess?.();
+      onClose();
+    },
+    onError: (failure: Error) => showToast(failure.message || 'Could not start U1 print', 'error'),
+  });
+  const textList = (values: unknown[], index: number) => typeof values[index] === 'string' ? String(values[index]) : '';
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-4" onClick={onClose}>
+      <Card className="w-full max-w-2xl max-h-[90vh] overflow-y-auto" onClick={(event) => event.stopPropagation()}>
+        <CardContent>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="flex items-center gap-2 text-lg font-semibold text-white"><Printer className="w-5 h-5 text-bambu-green" /> Print on Snapmaker U1</h2>
+            <Button variant="ghost" size="sm" onClick={onClose}><X className="w-5 h-5" /></Button>
+          </div>
+          <div className="flex gap-4 mb-4">
+            {!thumbnailFailed && <img src={api.getU1PrinterFileThumbnailUrl(file.printerId, file.path)} onError={() => setThumbnailFailed(true)} alt="G-code thumbnail" className="w-24 h-24 rounded object-cover bg-bambu-dark" />}
+            <div className="min-w-0 text-sm">
+              <p className="text-white break-all">{archiveName}</p>
+              <p className="text-bambu-gray">{estimatedTime != null ? `${Math.round(estimatedTime / 60)} min estimated` : 'Duration unavailable'}</p>
+              <p className="text-bambu-gray">{totalWeight != null ? `${totalWeight.toFixed(2)} g filament` : 'Filament total unavailable'}</p>
+            </div>
+          </div>
+          {isLoading && <p className="text-sm text-bambu-gray mb-4">Loading G-code metadata…</p>}
+          {error && <p className="text-sm text-orange-400 mb-4">Could not load G-code metadata: {(error as Error).message}</p>}
+          {!isLoading && !error && usedTools.length === 0 && <p className="text-sm text-orange-400 mb-4">This file does not identify its used logical filament slots. Printing is unavailable until Moonraker provides that metadata.</p>}
+          {usedTools.length > 0 && <div className="mb-4 space-y-2">
+            <h3 className="text-sm text-white font-medium">Filament mapping</h3>
+            {usedTools.map((logical) => {
+              const physical = physicalFor(logical);
+              const tray = trays.find((item) => item.id === physical);
+              const type = textList(types, logical);
+              const color = textList(colors, logical);
+              const mismatch = type && tray?.tray_type && type.toLowerCase() !== tray.tray_type.toLowerCase();
+              const expectedColor = color.replace(/^#/, '').slice(0, 6).toLowerCase();
+              const loadedColor = (tray?.tray_color || '').replace(/^#/, '').slice(0, 6).toLowerCase();
+              const colorMismatch = expectedColor.length === 6 && loadedColor.length === 6 && expectedColor !== loadedColor;
+              return <div key={logical} className="flex flex-wrap items-center gap-2 text-sm p-2 rounded bg-bambu-dark">
+                <span className="text-white">G-code T{logical}</span>
+                {typeof weights[logical] === 'number' && <span className="text-bambu-gray">{Number(weights[logical]).toFixed(2)} g</span>}
+                {type && <span className="text-bambu-gray">{type}</span>}
+                {color && <span className="w-3 h-3 rounded-full border border-white/30" style={{ backgroundColor: color }} title={color} />}
+                <span className="text-bambu-gray">→</span>
+                <select aria-label={`Physical toolhead for logical T${logical}`} value={physical} onChange={(event) => setMapping((old) => ({ ...old, [logical]: Number(event.target.value) }))} className="bg-bambu-dark-secondary text-white border border-bambu-dark-tertiary rounded px-2 py-1">
+                  {[0, 1, 2, 3].map((index) => {
+                    const loaded = trays.find((item) => item.id === index);
+                    return <option key={index} value={index}>U1 toolhead {index + 1}: {loaded?.tray_type || 'Unknown'} {loaded?.filament_detected ? '• loaded' : '• empty'}</option>;
+                  })}
+                </select>
+                {tray?.tray_color && <span className="w-3 h-3 rounded-full border border-white/30" style={{ backgroundColor: `#${tray.tray_color.replace(/^#/, '').slice(0, 6)}` }} title={tray.tray_color} />}
+                {mismatch && <span className="text-yellow-400">Material mismatch</span>}
+                {colorMismatch && <span className="text-yellow-400">Color mismatch</span>}
+                {!tray?.filament_detected && <span className="text-red-400">No filament loaded</span>}
+              </div>;
+            })}
+            {hasDuplicateMapping && <p className="text-red-400 text-xs">Each used filament needs a different physical toolhead.</p>}
+          </div>}
+          <PrintOptionsPanel options={options} onChange={setOptions} defaultExpanded supportedOptions={['bed_levelling', 'flow_cali', 'timelapse']} />
+          {options.flow_cali && <div className="mb-4 text-sm text-white">
+            <p className="mb-2">Flow calibration toolheads</p>
+            <div className="flex flex-wrap gap-3">{mappedTools.map((index) => <label key={index} className="flex items-center gap-1"><input type="checkbox" checked={flowExtruders.includes(index)} onChange={(event) => setFlowExtruders((old) => event.target.checked ? [...old, index] : old.filter((value) => value !== index))} />Toolhead {index + 1}</label>)}</div>
+          </div>}
+          <p className="text-xs text-bambu-gray mb-4">Confirm the file, mapping, and options before sending the print command.</p>
+          <div className="flex gap-3"><Button variant="secondary" onClick={onClose} className="flex-1">Cancel</Button><Button onClick={() => setConfirming(true)} disabled={!canPrint || startMutation.isPending} className="flex-1">Review and print</Button></div>
+        </CardContent>
+      </Card>
+      {confirming && <ConfirmModal
+        title="Start Snapmaker U1 print?"
+        message={`File: ${file.path}\nMapping: ${usedTools.map((logical) => `T${logical} → toolhead ${physicalFor(logical) + 1}`).join(', ')}\nBed leveling: ${options.bed_levelling ? 'on' : 'off'} · Flow calibration: ${options.flow_cali ? `toolheads ${flowExtruders.map((index) => index + 1).join(', ')}` : 'off'} · Timelapse: ${options.timelapse ? 'on' : 'off'}`}
+        confirmText="Start print"
+        onConfirm={() => { setConfirming(false); startMutation.mutate(); }}
+        onCancel={() => setConfirming(false)}
+      />}
     </div>
   );
 }

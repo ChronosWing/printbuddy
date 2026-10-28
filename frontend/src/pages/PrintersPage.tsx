@@ -2128,6 +2128,7 @@ function PrinterCard({
   const isPrusaModelPrinter = isPrusaPrinter(printer);
   const isBambuProvider = !printer.provider || printer.provider === 'bambu';
   const isMoonrakerProvider = printer.provider === 'klipper' || printer.provider === 'mainsail' || printer.provider === 'fluidd';
+  const isSnapmakerU1Provider = isMoonrakerProvider && /snapmaker\s*u1/i.test(printer.model || '');
   const isElegooSDCPProvider = printer.provider === 'elegoo_sdcp';
   const isCrealityK2Moonraker = isMoonrakerProvider && /creality\s+k2/i.test(printer.model || '');
   // Loaded-spool assignment is local inventory state, not a provider control.
@@ -4214,7 +4215,7 @@ function PrinterCard({
                         );
                       })}
 
-                      {isElegooSDCPProvider && (
+                      {(isElegooSDCPProvider || isSnapmakerU1Provider) && (
                         <button
                           type="button"
                           onClick={() => chamberLightMutation.mutate(!status.chamber_light)}
@@ -4222,16 +4223,16 @@ function PrinterCard({
                           className={`flex items-center gap-1 px-1.5 py-1 rounded transition-colors ${
                             status.chamber_light ? 'bg-yellow-500/10 hover:bg-yellow-500/20' : 'bg-bambu-dark hover:bg-bambu-dark-tertiary'
                           } disabled:opacity-50 disabled:cursor-not-allowed`}
-                          title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
+                          title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status.chamber_light == null ? 'Light state unknown; turn on' : status.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
                         >
-                          <ChamberLight on={status.chamber_light} className={`w-3.5 h-3.5 ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`} />
+                          <ChamberLight on={status.chamber_light ?? false} className={`w-3.5 h-3.5 ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`} />
                           <span className={`text-[10px] ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`}>
-                            {status.chamber_light ? t('common.on', 'On') : t('common.off', 'Off')}
+                            {status.chamber_light == null ? 'Unknown' : status.chamber_light ? t('common.on', 'On') : t('common.off', 'Off')}
                           </span>
                         </button>
                       )}
 
-                      {(fanItems.length > 0 || isElegooSDCPProvider) && <div className="w-px h-5 bg-bambu-gray/30" />}
+                      {(fanItems.length > 0 || isElegooSDCPProvider || isSnapmakerU1Provider) && <div className="w-px h-5 bg-bambu-gray/30" />}
 
                       {/* Airduct Mode (P2S / X2D / H2*) */}
                       {(['P2S', 'X2D', 'H2D', 'H2C', 'H2S'].includes(printer.model ?? '')) && (() => {
@@ -5780,7 +5781,7 @@ function PrinterCard({
         {viewMode === 'expanded' && (
           <SortablePrinterCardSection layoutEditing={layoutEditing} id="actions" title="Actions" order={getCardSectionOrder('actions')}>
           <div className="mt-4 pt-4 border-t border-bambu-dark-tertiary flex items-center justify-end gap-2 flex-wrap">
-              {isBambuProvider && !isPrusaModelPrinter && (
+              {(isBambuProvider || isSnapmakerU1Provider) && !isPrusaModelPrinter && (
                 <>
                   {/* Chamber Light */}
                   <Button
@@ -5788,7 +5789,7 @@ function PrinterCard({
                     size="sm"
                     onClick={() => chamberLightMutation.mutate(!status?.chamber_light)}
                     disabled={!status?.connected || chamberLightMutation.isPending || !hasPermission('printers:control')}
-                    title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status?.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
+                    title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status?.chamber_light == null ? 'Light state unknown; turn on' : status.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
                     className={status?.chamber_light ? '!border-yellow-500 !text-yellow-400 hover:!bg-yellow-500/20' : ''}
                   >
                     <ChamberLight on={status?.chamber_light ?? false} className={`w-4 h-4 ${status?.chamber_light ? 'text-yellow-400' : ''}`} />
@@ -5866,10 +5867,10 @@ function PrinterCard({
                       {t('common.upload', 'Upload')}
                     </Button>
                   )}
-                  {(isBambuProvider || isElegooSDCPProvider) && !isPrusaModelPrinter && (
+                  {(isBambuProvider || isElegooSDCPProvider || isSnapmakerU1Provider) && !isPrusaModelPrinter && (
                     <Button
                       size="sm"
-                      onClick={() => setShowUploadForPrint(true)}
+                      onClick={() => isSnapmakerU1Provider ? setShowFileManager(true) : setShowUploadForPrint(true)}
                       disabled={!hasPermission('printers:control')}
                       title={!hasPermission('printers:control') ? t('printers.permission.noControl') : t('common.print')}
                       className="!bg-bambu-green hover:!bg-bambu-green/80 !text-white"
