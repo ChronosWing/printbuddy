@@ -86,3 +86,12 @@ describe('FilamentSlotCircle', () => {
     expectColor(text.style.color, '#fff', 'rgb(255, 255, 255)');
   });
 });
+
+it('renders Moonraker hash-prefixed colors with readable text', () => {
+  const { container } = render(
+    <FilamentSlotCircle trayColor="#FFFF00" trayType="PLA" isEmpty={false} slotNumber={2} />
+  );
+  const circle = container.firstChild as HTMLElement;
+  expectColor(circle.style.backgroundColor, '#ffff00', 'rgb(255, 255, 0)');
+  expectColor((circle.firstChild as HTMLElement).style.color, '#000', 'rgb(0, 0, 0)');
+});

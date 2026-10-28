@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -188,7 +189,31 @@ class ThreeMFParser:
                         break
 
                 # Find the plate element (single-plate exports only have one plate)
-                plate = root.find(".//plate")
+                plates = root.findall(".//plate")
+                plate = (
+                    next(
+                        (
+                            p
+                            for p in plates
+                            if any(
+                                m.get("key") == "index" and m.get("value") == str(self.plate_number)
+                                for m in p.findall("metadata")
+                            )
+                        ),
+                        None,
+                    )
+                    if self.plate_number
+                    else (plates[0] if plates else None)
+                )
+                if (
+                    plate is None
+                    and len(plates) == 1
+                    and not any(m.get("key") == "index" for m in plates[0].findall("metadata"))
+                ):
+                    # Single-plate exports from some slicers omit the index.
+                    plate = plates[0]
+                if self.plate_number and plates and plate is None:
+                    return
 
                 if plate is not None:
                     # Extract metadata from plate element
@@ -234,7 +259,7 @@ class ThreeMFParser:
                 # Get filament info from filaments ACTUALLY USED in the print
                 # slice_info has <filament id="1" type="PLA" color="#FFFFFF" used_g="100" />
                 # Only include filaments where used_g > 0
-                filaments = root.findall(".//filament")
+                filaments = plate.findall(".//filament") if plate is not None else root.findall(".//filament")
                 if filaments:
                     # Collect unique filament types and colors for filaments that are actually used
                     types = []
@@ -306,10 +331,24 @@ class ThreeMFParser:
             if not gcode_files:
                 return
 
-            # Read first 4KB of G-code (header contains metadata)
-            gcode_path = gcode_files[0]
+            # Select the requested plate, never silently substitute another plate.
+            gcode_path = next(
+                (name for name in gcode_files if Path(name).name == f"plate_{self.plate_number}.gcode"), None
+            )
+            if gcode_path is None:
+                if self.plate_number and len(gcode_files) != 1:
+                    return
+                gcode_path = gcode_files[0]
+            # Orca/Snapmaker writes usage and configuration in the footer.
+            # Keep memory bounded even for large sliced archives.
+            window = 128 * 1024
             with zf.open(gcode_path) as f:
-                header = f.read(4096).decode("utf-8", errors="ignore")
+                head = f.read(window)
+                tail = head
+                while chunk := f.read(window):
+                    tail = (tail + chunk)[-window:]
+            header = (head + b"\n" + tail).decode("utf-8", errors="ignore")
+            self._parse_orca_filament_usage(header, zf)
 
             # Look for "; total layer number: XX" pattern
             match = re.search(r";\s*total\s+layer\s+number[:\s]+(\d+)", header, re.IGNORECASE)
@@ -341,6 +380,52 @@ class ThreeMFParser:
                     self.metadata["sliced_for_model"] = normalize_printer_model(raw_model)
         except Exception:
             pass  # G-code header parsing is best-effort; metadata may come from other sources
+
+    def _parse_orca_filament_usage(self, text: str, zf: zipfile.ZipFile) -> None:
+        """Read slicer tool estimates; keep zero entries so T2 never becomes T1."""
+
+        def numbers(unit: str) -> list[float]:
+            match = re.search(r";\s*filament used\s*\[" + unit + r"\]\s*[:=]\s*([^\r\n]+)", text, re.I)
+            if not match:
+                return []
+            try:
+                values = [float(v.strip()) for v in re.split(r"[,;]", match.group(1))]
+            except ValueError:
+                return []
+            return values if all(math.isfinite(v) and v >= 0 for v in values) else []
+
+        grams, lengths = numbers("g"), numbers("mm")
+        if grams:
+            self.metadata.setdefault("filament_used_grams", sum(grams))
+        if lengths:
+            self.metadata.setdefault("filament_used_mm", sum(lengths))
+        if not grams or self.metadata.get("filament_slots"):
+            return
+        config = {}
+        if "Metadata/project_settings.config" in zf.namelist():
+            try:
+                config = json.loads(zf.read("Metadata/project_settings.config"))
+            except (ValueError, UnicodeDecodeError):
+                pass
+
+        def values(key: str) -> list:
+            value = config.get(key, []) if isinstance(config, dict) else []
+            if isinstance(value, list) and value:
+                return value
+            match = re.search(r";\s*" + key + r"\s*=\s*([^\r\n]+)", text)
+            return [v.strip().strip('"') for v in re.split(r"[;,]", match.group(1))] if match else []
+
+        types, colors = values("filament_type"), values("filament_colour")
+        self.metadata["filament_slots"] = [
+            {
+                "slot_id": i + 1,
+                "used_g": round(weight, 2),
+                "type": types[i] if i < len(types) else "",
+                "color": colors[i] if i < len(colors) else "",
+            }
+            for i, weight in enumerate(grams)
+            if weight > 0
+        ]
 
     def _extract_filament_info(self, data: dict):
         """Extract filament info, preferring non-support filaments."""

@@ -334,6 +334,12 @@ export interface AMSTray {
   channel_action_state?: string | null;
   channel_error?: string | null;
   filament_source?: string | null;
+  remaining_weight?: number | null;
+  initial_weight?: number | null;
+  spoolman_spool_id?: number | null;
+  spoolman_filament_name?: string | null;
+  spoolman_vendor?: string | null;
+  native_spoolman?: boolean | null;
 }
 
 export interface AMSUnit {

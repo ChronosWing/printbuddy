@@ -30,6 +30,18 @@ describe('FilamentHoverCard', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
+  it('shows native manufacturer, name and zero grams without a known capacity', async () => {
+    renderWithHover(
+      <FilamentHoverCard data={{ ...baseFilamentData, vendor: 'SnapSpeed', profile: 'Matte Black', fillLevel: null, remainingWeightGrams: 0 }}>
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('SnapSpeed')).toBeInTheDocument());
+    expect(screen.getByText('Matte Black')).toBeInTheDocument();
+    expect(screen.getByText('• 0g')).toBeInTheDocument();
+  });
+
   describe('fill level display', () => {
     it('shows fill percentage when fillLevel is set', async () => {
       renderWithHover(

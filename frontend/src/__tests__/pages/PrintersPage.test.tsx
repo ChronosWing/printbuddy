@@ -11,6 +11,7 @@ import { PrintersPage } from '../../pages/PrintersPage';
 import { PRINTER_MODEL_GROUPS, mapModelCode } from '../../utils/printerModels';
 import { setAuthToken } from '../../api/client';
 import { http, HttpResponse } from 'msw';
+import { useQueryClient } from '@tanstack/react-query';
 import { server } from '../mocks/server';
 
 const mockPrinters = [
@@ -138,6 +139,46 @@ describe('PrintersPage', () => {
       const a2Group = PRINTER_MODEL_GROUPS.find((group) => group.label === 'Bambu Lab A2 Series');
       expect(a2Group?.options).toContainEqual({ value: 'A2L', label: 'A2L' });
     });
+  });
+
+  it('shows native U1 grams, zero and unknown weights, and refreshes reassigned spools', async () => {
+    let remaining = 468.167;
+    let spoolId = 38;
+    function RefreshStatus() {
+      const queryClient = useQueryClient();
+      return <button onClick={() => queryClient.invalidateQueries({ queryKey: ['printerStatus', 7] })}>Refresh test status</button>;
+    }
+    server.use(
+      http.get('/api/v1/printers/', () => HttpResponse.json([{
+        ...mockPrinters[0], id: 7, name: 'Snapmaker U1', model: 'Snapmaker U1', provider: 'fluidd',
+      }])),
+      http.get('/api/v1/printers/:id/status', () => HttpResponse.json({
+        ...mockPrinterStatus,
+        ams: [{ id: 0, name: 'Snapmaker U1 Feeders', module_type: 'snapmaker_u1',
+          tray: [remaining, 300.5, 0, null].map((weight, id) => ({
+            id, tray_type: 'PLA', tray_color: ['#000000', '#FF0000', '#F7BEA1', '#0066FF'][id],
+            remain: weight == null ? -1 : Math.round(weight / 5), remaining_weight: weight,
+            initial_weight: 500, native_spoolman: true, spoolman_spool_id: id === 0 ? spoolId : [38, 36, 31, 27][id],
+            spoolman_vendor: 'SnapSpeed', spoolman_filament_name: 'Matte Black',
+            loaded_to_feeder: true, loaded_to_extruder: id === 2, filament_detected: true,
+            state: 11,
+          })),
+        }],
+      })),
+    );
+    render(<><PrintersPage /><RefreshStatus /></>);
+    const card = await screen.findByTestId('printer-card-7');
+    expect(await within(card).findByTestId('u1-weight-0')).toHaveTextContent('468.2 g');
+    expect(within(card).getByTestId('u1-weight-1')).toHaveTextContent('300.5 g');
+    expect(within(card).getByTestId('u1-weight-2')).toHaveTextContent('0 g');
+    expect(within(card).getByTestId('u1-weight-3')).toHaveTextContent('—');
+    expect(within(card).getByTestId('u1-weight-0')).toHaveAttribute('title', 'SnapSpeed · Matte Black');
+    expect(within(card).getAllByText('PLA')).toHaveLength(4);
+    expect(within(card).getByText('In extruder')).toBeInTheDocument();
+    remaining = 12;
+    spoolId = 99;
+    fireEvent.click(screen.getByText('Refresh test status'));
+    await waitFor(() => expect(within(card).getByTestId('u1-weight-0')).toHaveTextContent('12 g'));
   });
 
   describe('rendering', () => {

@@ -14,6 +14,26 @@ from backend.app.services.printer_providers.factory import create_printer_client
 
 logger = logging.getLogger(__name__)
 
+
+def reported_nozzle_temperatures(temperatures: dict[str, object]) -> tuple[tuple[int, object], ...]:
+    """Return direct nozzle readings in stable physical-nozzle order.
+
+    Provider state uses ``nozzle`` for the first toolhead and ``nozzle_N`` for
+    subsequent toolheads. Targets and heating flags deliberately do not match,
+    so callers can safely use this for live-change de-duplication, persistence,
+    safety checks, and metric labels.
+    """
+
+    nozzles: list[tuple[int, object]] = []
+    for key, value in temperatures.items():
+        if key == "nozzle":
+            nozzles.append((1, value))
+            continue
+        if key.startswith("nozzle_") and key[7:].isdigit():
+            nozzles.append((int(key[7:]), value))
+    return tuple(sorted(nozzles))
+
+
 # Replacing a client can synchronously wait for its network thread. Keep that
 # teardown bounded so a failed device connection cannot freeze the API loop.
 REPLACEMENT_DISCONNECT_TIMEOUT_SECONDS = 2.0
@@ -592,10 +612,9 @@ class PrinterManager:
                 logger.warning("Printer %s disconnected during cooldown wait", printer_id)
                 return False
 
-            # Check nozzle temperature (and nozzle_2 for dual extruders)
-            nozzle_temp = state.temperatures.get("nozzle", 0)
-            nozzle_2_temp = state.temperatures.get("nozzle_2", 0)
-            max_temp = max(nozzle_temp, nozzle_2_temp)
+            # A printer is only safe after every reported toolhead is cool.
+            nozzle_temperatures = [float(value) for _index, value in reported_nozzle_temperatures(state.temperatures)]
+            max_temp = max(nozzle_temperatures, default=0)
 
             if max_temp <= target_temp:
                 logger.info("Printer %s cooled down to %s°C", printer_id, max_temp)
@@ -913,7 +932,7 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
                         "tray_sub_brands": tray.get("tray_sub_brands"),
                         "tray_id_name": tray.get("tray_id_name"),
                         "tray_info_idx": tray.get("tray_info_idx"),
-                        "remain": tray.get("remain", 0),
+                        "remain": tray.get("remain", 0) if tray.get("remain", 0) is not None else -1,
                         "k": k_value,
                         "cali_idx": cali_idx,
                         "tag_uid": tag_uid,
@@ -923,6 +942,26 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
                         "drying_temp": tray.get("drying_temp"),
                         "drying_time": tray.get("drying_time"),
                         "state": state_val,
+                        **{
+                            key: tray[key]
+                            for key in (
+                                "active",
+                                "loaded_to_feeder",
+                                "loaded_to_extruder",
+                                "filament_detected",
+                                "channel_state",
+                                "channel_action_state",
+                                "channel_error",
+                                "filament_source",
+                                "remaining_weight",
+                                "initial_weight",
+                                "spoolman_spool_id",
+                                "spoolman_filament_name",
+                                "spoolman_vendor",
+                                "native_spoolman",
+                            )
+                            if key in tray
+                        },
                     }
                 )
             # Prefer humidity_raw (actual percentage) over humidity (index 1-5)
@@ -1093,6 +1132,11 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
         # "Clear Plate" button only appears when the 30 s REST fallback poll runs.
         "awaiting_plate_clear": printer_manager.is_awaiting_plate_clear(printer_id) if printer_id else False,
     }
+    file_metadata = getattr(state, "file_metadata", None)
+    if isinstance(file_metadata, dict) and file_metadata:
+        result["estimated_time"] = file_metadata.get("estimated_time")
+        result["filament_weight_total"] = file_metadata.get("filament_weight_total")
+        result["filament_weights"] = file_metadata.get("filament_weights")
     # Add cover URL if there's an active print and printer_id is provided
     # Include PAUSE state so skip objects modal can show cover
     if printer_id and state.state in ("RUNNING", "PAUSE") and state.gcode_file:

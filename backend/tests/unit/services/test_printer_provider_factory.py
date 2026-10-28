@@ -967,15 +967,20 @@ def test_moonraker_elegoo_maps_mks_gcode_paths_to_gcodes_root(monkeypatch):
         calls.append(("post", f"{url} {kwargs.get('json') or {}}"))
         return httpx.Response(200, json={"result": {}}, request=httpx.Request("POST", str(url)))
 
+    def fake_delete(url, **kwargs):  # noqa: ARG001
+        calls.append(("delete", str(url)))
+        return httpx.Response(200, json={"action": "delete_file"}, request=httpx.Request("DELETE", str(url)))
+
     monkeypatch.setattr(httpx, "get", fake_get)
     monkeypatch.setattr(httpx, "post", fake_post)
+    monkeypatch.setattr(httpx, "delete", fake_delete)
     client = MoonrakerPrinterClient("http://neptune.local:7125", printer_model="Elegoo Neptune 4 Pro")
 
     assert client.download_file("/home/mks/printer_data/gcodes/cube.gcode") == b"G28\n"
     assert client.delete_file("/home/mks/gcode_files/cube.gcode") is True
     assert client.start_print("/home/mks/printer_data/gcodes/cube.gcode") is True
 
-    assert ("post", "http://neptune.local:7125/server/files/delete_file {'path': 'gcodes/cube.gcode'}") in calls
+    assert ("delete", "http://neptune.local:7125/server/files/gcodes/cube.gcode") in calls
     assert ("post", "http://neptune.local:7125/printer/print/start {'filename': 'cube.gcode'}") in calls
 
 

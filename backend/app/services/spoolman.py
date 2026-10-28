@@ -56,6 +56,7 @@ class AMSTray:
     tray_uuid: str  # Spool UUID
     tray_info_idx: str  # Bambu filament preset ID like "GFA00"
     tray_weight: int  # Spool weight in grams (usually 1000)
+    native_spoolman: bool = False
 
 
 class SpoolmanNotFoundError(Exception):
@@ -934,7 +935,7 @@ class SpoolmanClient:
         tray_info_idx = tray_data.get("tray_info_idx", "") or ""
 
         # Get remaining percentage (-1 means unknown/not read by AMS)
-        remain = int(tray_data.get("remain", -1))
+        remain = int(tray_data["remain"]) if tray_data.get("remain") is not None else -1
 
         return AMSTray(
             ams_id=ams_id,
@@ -947,6 +948,7 @@ class SpoolmanClient:
             tray_uuid=tray_uuid,
             tray_info_idx=tray_info_idx.strip(),
             tray_weight=int(tray_data.get("tray_weight", 1000)),
+            native_spoolman=tray_data.get("native_spoolman") is True,
         )
 
     def convert_ams_slot_to_location(self, ams_id: int, tray_id: int) -> str:
@@ -1002,6 +1004,8 @@ class SpoolmanClient:
         spoolman_spool_id_hint: int | None = None,
     ) -> dict | None:
         """Sync one AMS tray to Spoolman; creates the spool on first sight, updates weight otherwise."""
+        if tray.native_spoolman is True:
+            return None
         logger.debug(
             f"Processing {printer_name} AMS {tray.ams_id} tray {tray.tray_id}: "
             f"type={tray.tray_type}, idx={tray.tray_info_idx or 'none'}, "

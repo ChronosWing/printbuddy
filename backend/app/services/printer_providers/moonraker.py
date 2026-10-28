@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -26,6 +28,7 @@ class MoonrakerPrinterState:
     raw_status: dict[str, Any] = field(default_factory=dict)
     raw_data: dict[str, Any] = field(default_factory=dict)
     gcode_file: str | None = None
+    file_metadata: dict[str, Any] = field(default_factory=dict)
     subtask_id: str | None = None
     hms_errors: list[Any] = field(default_factory=list)
     kprofiles: list[Any] = field(default_factory=list)
@@ -227,6 +230,19 @@ def _snapmaker_list_value(config: dict[str, Any], key: str, index: int) -> Any:
     return None
 
 
+def _snapmaker_u1_spool_id(value: Any) -> int | None:
+    # Never truncate fractional IDs or interpret bool as spool 1.
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    if isinstance(value, str) and not re.fullmatch(r"[0-9]+", value):
+        return None
+    try:
+        spool_id = int(value)
+    except ValueError:
+        return None
+    return spool_id if spool_id > 0 else None
+
+
 def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> dict[str, Any]:
     """Extract real U1 slot metadata from print_task_config arrays.
 
@@ -248,13 +264,15 @@ def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> 
     sku = _safe_int(_snapmaker_list_value(config, "filament_sku", index))
     color = None
     if material:
-        color = _normalize_snapmaker_u1_color(_snapmaker_list_value(config, "filament_color_rgba", index))
+        rgba = _snapmaker_list_value(config, "filament_color_rgba", index)
+        color = f"#{rgba[:6]}" if isinstance(rgba, str) and re.fullmatch(r"[0-9a-fA-F]{8}", rgba) else None
         if color is None:
             color = _normalize_snapmaker_u1_color(_snapmaker_list_value(config, "filament_color", index))
 
     source = "unset"
     if material:
-        source = "manual" if edited else "rfid"
+        spool_id = _snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", index)) or 0
+        source = "spoolman" if spool_id > 0 else ("rfid" if official else "manual")
 
     return {
         "material": material,
@@ -560,6 +578,8 @@ class MoonrakerPrinterClient:
         self._has_status_sample = False
         self._last_bed_temp: float | None = None
         self._current_print_started_at: float | None = None
+        self._u1_spool_cache: dict[int, tuple[float, dict[str, Any] | None]] = {}
+        self._file_metadata_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -1012,6 +1032,80 @@ class MoonrakerPrinterClient:
         if isinstance(filament_rack, dict):
             self.state.raw_data["filament_rack"] = filament_rack
 
+    def _u1_spool_inventory(self, spool_id: int) -> dict[str, Any] | None:
+        """Read inventory through the existing Moonraker connection only.
+
+        The HTTP POST is Moonraker's proxy transport; the proxied operation is
+        always GET. Cache successes for 60 seconds and failures for 15 seconds.
+        Failed refreshes discard old weight rather than showing stale quantities.
+        """
+        now = time.monotonic()
+        cached = self._u1_spool_cache.get(spool_id)
+        if cached and now < cached[0]:
+            return cached[1]
+        inventory = None
+        try:
+            result = self._post(
+                "server/spoolman/proxy",
+                {
+                    "request_method": "GET",
+                    "path": f"/v1/spool/{spool_id}",
+                },
+            )
+            if _snapmaker_u1_spool_id(result.get("id")) == spool_id:
+
+                def grams(value: Any) -> float | None:
+                    if isinstance(value, bool):
+                        return None
+                    number = _safe_float(value)
+                    return number if number is not None and math.isfinite(number) and number >= 0 else None
+
+                filament = result.get("filament")
+                filament = filament if isinstance(filament, dict) else {}
+                initial = grams(result.get("initial_weight"))
+                if initial is None or initial == 0:
+                    initial = grams(filament.get("weight"))
+                vendor = filament.get("vendor")
+                inventory = {
+                    "remaining_weight": grams(result.get("remaining_weight")),
+                    "initial_weight": initial,
+                    "spoolman_filament_name": _snapmaker_clean_text(filament.get("name")),
+                    "spoolman_vendor": _snapmaker_clean_text(vendor.get("name")) if isinstance(vendor, dict) else "",
+                }
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Optional inventory must never make the printer offline or erase
+            # authoritative U1 material, color, or load state.
+            pass
+        self._u1_spool_cache[spool_id] = (time.monotonic() + (60 if inventory is not None else 15), inventory)
+        return inventory
+
+    def _apply_u1_spool_inventory(self, slots: dict[int, dict[str, Any]], config: dict[str, Any]) -> None:
+        if "snapmaker" not in self.printer_model.lower() or "u1" not in self.printer_model.lower():
+            return
+        assignments = {
+            index: _snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", index)) for index in slots
+        }
+        active_ids = {spool_id for spool_id in assignments.values() if spool_id is not None}
+        self._u1_spool_cache = {key: value for key, value in self._u1_spool_cache.items() if key in active_ids}
+        for index, spool_id in assignments.items():
+            slot = slots[index]
+            slot["spoolman_spool_id"] = spool_id
+            slot["native_spoolman"] = spool_id is not None
+            if spool_id is None:
+                continue
+            # Do not substitute a feeder estimate or a differently assigned
+            # PrintBuddy spool if this native inventory record is unavailable.
+            slot.update(remaining_weight=None, initial_weight=None, remain=None)
+            if not self.state.connected:
+                continue
+            inventory = self._u1_spool_inventory(spool_id)
+            if inventory is None:
+                continue
+            slot.update(inventory)
+            remaining, initial = inventory["remaining_weight"], inventory["initial_weight"]
+            if remaining is not None and initial is not None and initial > 0:
+                slot["remain"] = max(0, min(100, round(remaining / initial * 100)))
+
     def _apply_snapmaker_u1_status(self, status: dict[str, Any]) -> None:
         if not isinstance(status, dict):
             return
@@ -1090,6 +1184,11 @@ class MoonrakerPrinterClient:
                     "filament_edit": task_metadata.get("edited"),
                     "filament_sku": task_metadata.get("sku"),
                     "filament_exist": task_metadata.get("exists"),
+                    "native_spoolman": (
+                        _snapmaker_u1_spool_id(_snapmaker_list_value(task_config, "filament_spool_id", extruder_index))
+                        or 0
+                    )
+                    > 0,
                     "raw": values,
                 }
 
@@ -1132,6 +1231,7 @@ class MoonrakerPrinterClient:
                 slot["vendor"] = metadata["vendor"]
             slot["raw_spool"] = values
 
+        self._apply_u1_spool_inventory(feed_slots, task_config)
         if feed_slots:
             trays = [feed_slots[index] for index in sorted(feed_slots)]
             active_slots = [tray["slot"] for tray in trays if tray.get("active")]
@@ -1240,6 +1340,7 @@ class MoonrakerPrinterClient:
 
     def disconnect(self, timeout: float = 0) -> None:  # noqa: ARG002 - kept for Bambu client compatibility
         self.state.connected = False
+        self._u1_spool_cache.clear()
 
     def check_staleness(self) -> bool:
         try:
@@ -1250,7 +1351,7 @@ class MoonrakerPrinterClient:
 
     def _build_lifecycle_payload(self) -> dict[str, Any]:
         filename = self.state.subtask_name or self.state.current_print or self.state.gcode_file or "Unknown"
-        return {
+        payload = {
             "filename": filename,
             "subtask_name": filename,
             "progress": self.state.progress,
@@ -1258,6 +1359,35 @@ class MoonrakerPrinterClient:
             "status": self.state.state,
             "raw_data": self.state.raw_data,
         }
+        if filename != "Unknown":
+            metadata = self.get_file_metadata(filename)
+            if metadata:
+                payload["file_metadata"] = metadata
+                self.state.file_metadata = metadata
+                layer_count = _safe_int(metadata.get("layer_count"))
+                if layer_count is not None and layer_count > 0:
+                    self.state.total_layers = layer_count
+                estimated_time = _safe_int(metadata.get("estimated_time"))
+                if estimated_time is not None and estimated_time > 0 and not self.state.remaining_time:
+                    payload["remaining_time"] = estimated_time
+        return payload
+
+    def get_file_metadata(self, filename: str) -> dict[str, Any]:
+        """Fetch Moonraker's slicer metadata once per active G-code file."""
+        normalized = self._normalize_gcodes_path(filename)
+        if not normalized:
+            return {}
+        if normalized not in self._file_metadata_cache:
+            try:
+                metadata = self._get(f"server/files/metadata?filename={quote(normalized, safe='')}")
+            except (httpx.HTTPError, ValueError, TypeError):
+                return {}
+            if not metadata:
+                return {}
+            self._file_metadata_cache[normalized] = metadata
+            if len(self._file_metadata_cache) > 8:
+                self._file_metadata_cache.pop(next(iter(self._file_metadata_cache)))
+        return self._file_metadata_cache[normalized]
 
     def _emit_status_callbacks(self, previous_state: str | None) -> None:
         if self.on_state_change:
@@ -1278,6 +1408,8 @@ class MoonrakerPrinterClient:
         # owns that case; this edge detector is for new Moonraker transitions.
         if previous_state is not None and not previous_running and current_running:
             self._current_print_started_at = time.monotonic()
+            if self.state.gcode_file:
+                self._file_metadata_cache.pop(self._normalize_gcodes_path(self.state.gcode_file), None)
             if self.on_print_start:
                 self.on_print_start(self._build_lifecycle_payload())
         elif previous_running and not current_running:
@@ -1327,6 +1459,8 @@ class MoonrakerPrinterClient:
         self.state.state = _map_moonraker_state(raw_state)
         reported_file = print_stats.get("filename") or virtual_sdcard.get("file_path")
         if reported_file:
+            if self.state.gcode_file != str(reported_file):
+                self.state.file_metadata = {}
             self.state.gcode_file = str(reported_file)
             self.state.current_print = self.state.gcode_file
             self.state.subtask_name = self.state.gcode_file
@@ -1350,6 +1484,14 @@ class MoonrakerPrinterClient:
         else:
             self.state.progress = raw_progress
             self.state.remaining_time = _remaining_minutes(print_stats, self.state.progress)
+            if not self.state.remaining_time and self.state.gcode_file:
+                metadata = self._file_metadata_cache.get(self._normalize_gcodes_path(self.state.gcode_file), {})
+                if metadata:
+                    self.state.file_metadata = metadata
+                estimated = _safe_float(metadata.get("estimated_time"))
+                duration = _safe_float(print_stats.get("print_duration")) or 0.0
+                if estimated and estimated > duration:
+                    self.state.remaining_time = int((estimated - duration) // 60)
         self.state.temperatures = _moonraker_temperatures(status)
         self._apply_snapmaker_u1_status(status)
         _apply_moonraker_fans(self.state, status)
@@ -1372,9 +1514,55 @@ class MoonrakerPrinterClient:
 
     def delete_file(self, remote_path: str, *, storage: str | None = None) -> bool:
         root = str(storage or "gcodes").strip().strip("/") or "gcodes"
+        if root != "gcodes":
+            raise ValueError("Moonraker File Manager can only delete from the gcodes root")
         normalized = self._normalize_gcodes_path(remote_path)
-        self._post("server/files/delete_file", {"path": f"{root}/{normalized}"})
+        if not normalized or any(part in {"", ".", ".."} for part in normalized.split("/")) or "\\" in normalized:
+            raise ValueError("Invalid Moonraker file path")
+        encoded_path = "/".join(quote(part, safe="") for part in normalized.split("/"))
+        response = httpx.delete(
+            urljoin(self.base_url, f"server/files/gcodes/{encoded_path}"),
+            headers=self._headers,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
         return True
+
+    def configure_u1_filament(self, ams_id: int, tray_id: int, material: str, subtype: str, color: str) -> None:
+        """Edit manual U1 metadata without taking ownership from RFID/Spoolman."""
+        if "snapmaker" not in self.printer_model.lower() or "u1" not in self.printer_model.lower():
+            raise NotImplementedError("Filament configuration is not supported for this Moonraker printer")
+        if ams_id != 0 or tray_id not in range(4):
+            raise ValueError("U1 filament slot must be 0 through 3 in feeder unit 0")
+        color = color.removeprefix("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?", color):
+            raise ValueError("Filament color must be RGB or RGBA hexadecimal")
+
+        # Klipper parses quoted extended parameters; reject command delimiters.
+        def quoted(value: str) -> str:
+            if not value or len(value) > 128 or any(c in value for c in '\n\r;"\\'):
+                raise ValueError("Invalid filament material, subtype, or vendor")
+            return f'"{value}"'
+
+        material_arg = quoted(material.strip())
+        subtype_arg = quoted(subtype.strip() or material.strip())
+        status = self._query_objects(["print_task_config"])
+        config = status.get("print_task_config")
+        if not isinstance(config, dict):
+            raise NotImplementedError("U1 filament configuration status is unavailable")
+        if (
+            _snapmaker_list_value(config, "filament_official", tray_id)
+            or (_snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", tray_id)) or 0) > 0
+        ):
+            raise PermissionError("This slot is managed by RFID or native Spoolman; edit it in the U1 Filament Manager")
+        vendor = _snapmaker_clean_text(_snapmaker_list_value(config, "filament_vendor", tray_id)) or "Generic"
+        script = (
+            f"SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER={tray_id} VENDOR={quoted(vendor)} "
+            f"FILAMENT_TYPE={material_arg} FILAMENT_SUBTYPE={subtype_arg} FILAMENT_COLOR_RGBA={color.upper()}"
+        )
+        # Do not use send_gcode's timeout-as-success fallback for a metadata edit.
+        self._post("printer/gcode/script", {"script": script})
+        self.request_status_update()
 
     def send_gcode(self, script: str) -> bool:
         if not script.strip():

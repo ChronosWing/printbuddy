@@ -8,6 +8,16 @@ Printbuddy is a modified fork of an upstream AGPL-3.0 project. The upstream hist
 - Notice date: 2026-06-07
 - Date meaning: the most recent Printbuddy-side git commit date touching the path, based on the current repository history. For files changed in the working release change, the date is the notice update date.
 
+## ChronosWing U1 development changes — 2026-10-28
+
+This fork modifies U1 filament status serialization and colors, provider-specific
+filament editing, sliced 3MF usage parsing and API responses, and native Spoolman
+ownership handling. Regression tests and offline development instructions are
+included. See `docs/development/snapmaker-u1.md` for scope and validation limits.
+Native Spoolman inventory reads, grams display, REST/live-state fields, caching,
+and exclusions from legacy AMS weight writes were added on 2026-10-28.
+Original Printbuddy and Bambuddy attribution and license text are retained.
+
 ## Modified files
 
 - `.codeql/codeql-config.yml` — modified by Printbuddy; latest modification date: 2026-06-06.

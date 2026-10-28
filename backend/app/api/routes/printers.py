@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import posixpath
 import re
 import tempfile
 import zipfile
@@ -57,7 +58,7 @@ from backend.app.services.printer_manager import (
     supports_drying,
 )
 from backend.app.services.printer_providers.factory import create_printer_client, normalize_provider
-from backend.app.services.printer_providers.moonraker import create_moonraker_client
+from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient, create_moonraker_client
 from backend.app.utils.filament_ids import effective_bambu_material, generic_bambu_filament_id
 from backend.app.utils.http import build_content_disposition
 
@@ -703,7 +704,7 @@ async def get_printer_status(
                         tray_sub_brands=tray_data.get("tray_sub_brands"),
                         tray_id_name=tray_data.get("tray_id_name"),
                         tray_info_idx=tray_data.get("tray_info_idx"),
-                        remain=tray_data.get("remain", 0),
+                        remain=tray_data.get("remain", 0) if tray_data.get("remain", 0) is not None else -1,
                         k=k_value,
                         cali_idx=cali_idx,
                         tag_uid=tag_uid,
@@ -713,6 +714,20 @@ async def get_printer_status(
                         drying_temp=tray_data.get("drying_temp"),
                         drying_time=tray_data.get("drying_time"),
                         state=tray_data.get("state"),
+                        active=tray_data.get("active"),
+                        loaded_to_feeder=tray_data.get("loaded_to_feeder"),
+                        loaded_to_extruder=tray_data.get("loaded_to_extruder"),
+                        filament_detected=tray_data.get("filament_detected"),
+                        channel_state=tray_data.get("channel_state"),
+                        channel_action_state=tray_data.get("channel_action_state"),
+                        channel_error=tray_data.get("channel_error"),
+                        filament_source=tray_data.get("filament_source"),
+                        remaining_weight=tray_data.get("remaining_weight"),
+                        initial_weight=tray_data.get("initial_weight"),
+                        spoolman_spool_id=tray_data.get("spoolman_spool_id"),
+                        spoolman_filament_name=tray_data.get("spoolman_filament_name"),
+                        spoolman_vendor=tray_data.get("spoolman_vendor"),
+                        native_spoolman=tray_data.get("native_spoolman"),
                     )
                 )
             # Prefer humidity_raw (percentage) over humidity (index 1-5)
@@ -1105,6 +1120,54 @@ async def get_printer_cover(
     subtask_name = state.subtask_name
     if not subtask_name:
         raise HTTPException(404, f"No subtask_name in printer state (state={state.state})")
+
+    if printer.provider in {"klipper", "mainsail", "fluidd"}:
+        from backend.app.models.archive import PrintArchive
+
+        archive_result = await db.execute(
+            select(PrintArchive)
+            .where(
+                PrintArchive.printer_id == printer_id,
+                PrintArchive.filename == subtask_name,
+                PrintArchive.status == "printing",
+            )
+            .order_by(PrintArchive.created_at.desc())
+            .limit(1)
+        )
+        archive = archive_result.scalar_one_or_none()
+        if archive and archive.thumbnail_path:
+            local_path = settings.base_dir / archive.thumbnail_path
+            if local_path.is_file():
+                extension = local_path.suffix.lower()
+                media_type = "image/jpeg" if extension in {".jpg", ".jpeg"} else f"image/{extension.lstrip('.')}"
+                return Response(content=local_path.read_bytes(), media_type=media_type)
+        client = printer_manager.get_client(printer_id)
+        metadata = getattr(state, "file_metadata", None) or {}
+        thumbnails = metadata.get("thumbnails") if isinstance(metadata, dict) else None
+        if client and isinstance(thumbnails, list):
+            for item in sorted(
+                (entry for entry in thumbnails if isinstance(entry, dict)),
+                key=lambda entry: (entry.get("width") or 0) * (entry.get("height") or 0),
+                reverse=True,
+            ):
+                relative = item.get("relative_path")
+                if (
+                    not isinstance(relative, str)
+                    or not relative
+                    or relative.startswith("/")
+                    or ".." in relative.split("/")
+                ):
+                    continue
+                path = posixpath.normpath(posixpath.join(posixpath.dirname(subtask_name), relative))
+                try:
+                    image = await asyncio.to_thread(client.download_file, path)
+                except (httpx.HTTPError, ValueError):
+                    continue
+                if image:
+                    extension = posixpath.splitext(relative)[1].lower()
+                    media_type = "image/jpeg" if extension in {".jpg", ".jpeg"} else "image/png"
+                    return Response(content=image, media_type=media_type)
+        raise HTTPException(404, "No Moonraker thumbnail available")
 
     # Resolve the active plate. Precedence (#1166):
     #   1. The plate Printbuddy dispatched (authoritative when we sent the print)
@@ -2084,7 +2147,20 @@ async def delete_printer_file(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        success = provider_client.delete_file(path, storage=storage)
+        try:
+            success = provider_client.delete_file(path, storage=storage)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            raise HTTPException(
+                status_code if status_code in {400, 401, 403, 404, 409} else 502,
+                f"Printer file delete failed: HTTP {status_code}",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise HTTPException(504, "Printer file delete timed out") from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(503, "Printer is unavailable") from exc
     else:
         success = await delete_file_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if not success:
@@ -2653,6 +2729,23 @@ async def configure_ams_slot(
     client = printer_manager.get_client(printer_id)
     if not client:
         raise HTTPException(status_code=400, detail="Printer not connected")
+
+    if isinstance(client, MoonrakerPrinterClient):
+        try:
+            await asyncio.to_thread(
+                client.configure_u1_filament, ams_id, tray_id, tray_type, tray_sub_brands, tray_color
+            )
+        except NotImplementedError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "U1 filament update failed; refresh status before retrying") from exc
+        return {"success": True}
+    if not callable(getattr(client, "ams_set_filament_setting", None)):
+        raise HTTPException(409, "Filament configuration is unsupported by this printer provider")
 
     # Resolve tray_info_idx for the MQTT command.
     # Priority:
