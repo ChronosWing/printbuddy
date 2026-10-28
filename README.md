@@ -1,3 +1,18 @@
+# PrintBuddy — Snapmaker U1 Enhanced Fork
+
+This community fork builds on the original [PrintBuddy by vmhomelab](https://github.com/vmhomelab/Printbuddy) to improve compatibility with the **Snapmaker U1 running paxx12 Extended Firmware**. These U1 enhancements are specific to this fork. This project is not affiliated with Snapmaker or endorsed by the original PrintBuddy developers. The original project's documentation and [AGPL-3.0 license](LICENSE) remain in place below.
+
+### Snapmaker U1 improvements
+
+- Accurate filament materials, colors, loaded states, and assignments across all four U1 toolheads.
+- Native Spoolman inventory through Moonraker, including remaining filament weights and guards against duplicate filament deductions.
+- OrcaSlicer print metadata with estimated time, layer count, and per-toolhead filament estimates.
+- Moonraker thumbnail retrieval and persistent archive thumbnails, even after the G-code is removed from the printer.
+- U1 G-code browsing and deletion through Moonraker, plus U1-specific filament editing.
+
+**Current U1 limitations:** Starting prints directly from PrintBuddy and U1 lighting controls are not yet implemented.
+
+---
 
 <p align="center">
   <!-- Replace this with your logo path once added to the repository -->
@@ -128,7 +143,7 @@ Download your Printbuddy here:
 
 ---
 
-## Repository workflow
+## Original project repository workflow
 
 Development happens on the `dev` branch first.
 
@@ -146,11 +161,11 @@ main -> stable releases
 
 ## Docker quick start
 
-For the first test deployment, build directly from the `dev` branch:
+To build this U1-enhanced fork, use its `main` branch:
 
 ```bash
-git clone -b dev https://github.com/vmhomelab/Printbuddy.git
-cd Printbuddy
+git clone -b main https://github.com/ChronosWing/printbuddy.git
+cd printbuddy
 docker compose up -d --build
 ```
 
