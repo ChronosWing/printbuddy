@@ -302,6 +302,14 @@ class AMSTray(BaseModel):
     drying_temp: int | None = None  # RFID-recommended drying temp
     drying_time: int | None = None  # RFID-recommended drying time (hours)
     state: int | None = None  # AMS tray state: 9=empty, 10=spool present not loaded, 11=loaded
+    active: bool | None = None
+    loaded_to_feeder: bool | None = None
+    loaded_to_extruder: bool | None = None
+    filament_detected: bool | None = None
+    channel_state: str | None = None
+    channel_action_state: str | None = None
+    channel_error: str | None = None
+    filament_source: str | None = None
 
 
 class AMSUnit(BaseModel):

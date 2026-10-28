@@ -168,6 +168,8 @@ def build_ams_tray_lookup(raw_data: dict) -> dict[int, dict]:
                 "tag_uid": tray.get("tag_uid", ""),
                 "tray_type": tray.get("tray_type", ""),
             }
+            if tray.get("native_spoolman"):
+                lookup[global_tray_id]["native_spoolman"] = True
 
     # External spool(s) (vt_tray is a list, global_tray_id from each entry's "id")
     for vt in raw_data.get("vt_tray") or []:
@@ -425,6 +427,10 @@ async def _report_spool_usage_for_slots(
             tray_info = {"tray_uuid": "", "tag_uid": "", "tray_type": ""}
         if not tray_info:
             logger.debug("[SPOOLMAN] Slot %s: no tray at global_tray_id %s", slot_id, global_tray_id)
+            continue
+
+        if tray_info.get("native_spoolman"):
+            logger.debug("[SPOOLMAN] Slot %s usage is managed by U1 firmware", slot_id)
             continue
 
         is_external = global_tray_id >= 254

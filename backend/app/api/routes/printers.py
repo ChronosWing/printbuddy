@@ -57,7 +57,7 @@ from backend.app.services.printer_manager import (
     supports_drying,
 )
 from backend.app.services.printer_providers.factory import create_printer_client, normalize_provider
-from backend.app.services.printer_providers.moonraker import create_moonraker_client
+from backend.app.services.printer_providers.moonraker import MoonrakerPrinterClient, create_moonraker_client
 from backend.app.utils.filament_ids import effective_bambu_material, generic_bambu_filament_id
 from backend.app.utils.http import build_content_disposition
 
@@ -703,7 +703,7 @@ async def get_printer_status(
                         tray_sub_brands=tray_data.get("tray_sub_brands"),
                         tray_id_name=tray_data.get("tray_id_name"),
                         tray_info_idx=tray_data.get("tray_info_idx"),
-                        remain=tray_data.get("remain", 0),
+                        remain=tray_data.get("remain", 0) if tray_data.get("remain", 0) is not None else -1,
                         k=k_value,
                         cali_idx=cali_idx,
                         tag_uid=tag_uid,
@@ -713,6 +713,14 @@ async def get_printer_status(
                         drying_temp=tray_data.get("drying_temp"),
                         drying_time=tray_data.get("drying_time"),
                         state=tray_data.get("state"),
+                        active=tray_data.get("active"),
+                        loaded_to_feeder=tray_data.get("loaded_to_feeder"),
+                        loaded_to_extruder=tray_data.get("loaded_to_extruder"),
+                        filament_detected=tray_data.get("filament_detected"),
+                        channel_state=tray_data.get("channel_state"),
+                        channel_action_state=tray_data.get("channel_action_state"),
+                        channel_error=tray_data.get("channel_error"),
+                        filament_source=tray_data.get("filament_source"),
                     )
                 )
             # Prefer humidity_raw (percentage) over humidity (index 1-5)
@@ -2653,6 +2661,23 @@ async def configure_ams_slot(
     client = printer_manager.get_client(printer_id)
     if not client:
         raise HTTPException(status_code=400, detail="Printer not connected")
+
+    if isinstance(client, MoonrakerPrinterClient):
+        try:
+            await asyncio.to_thread(
+                client.configure_u1_filament, ams_id, tray_id, tray_type, tray_sub_brands, tray_color
+            )
+        except NotImplementedError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "U1 filament update failed; refresh status before retrying") from exc
+        return {"success": True}
+    if not callable(getattr(client, "ams_set_filament_setting", None)):
+        raise HTTPException(409, "Filament configuration is unsupported by this printer provider")
 
     # Resolve tray_info_idx for the MQTT command.
     # Priority:

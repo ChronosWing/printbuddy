@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -248,13 +249,15 @@ def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> 
     sku = _safe_int(_snapmaker_list_value(config, "filament_sku", index))
     color = None
     if material:
-        color = _normalize_snapmaker_u1_color(_snapmaker_list_value(config, "filament_color_rgba", index))
+        rgba = _snapmaker_list_value(config, "filament_color_rgba", index)
+        color = f"#{rgba[:6]}" if isinstance(rgba, str) and re.fullmatch(r"[0-9a-fA-F]{8}", rgba) else None
         if color is None:
             color = _normalize_snapmaker_u1_color(_snapmaker_list_value(config, "filament_color", index))
 
     source = "unset"
     if material:
-        source = "manual" if edited else "rfid"
+        spool_id = _safe_int(_snapmaker_list_value(config, "filament_spool_id", index)) or 0
+        source = "spoolman" if spool_id > 0 else ("rfid" if official else "manual")
 
     return {
         "material": material,
@@ -1090,6 +1093,10 @@ class MoonrakerPrinterClient:
                     "filament_edit": task_metadata.get("edited"),
                     "filament_sku": task_metadata.get("sku"),
                     "filament_exist": task_metadata.get("exists"),
+                    "native_spoolman": (
+                        _safe_int(_snapmaker_list_value(task_config, "filament_spool_id", extruder_index)) or 0
+                    )
+                    > 0,
                     "raw": values,
                 }
 
@@ -1375,6 +1382,42 @@ class MoonrakerPrinterClient:
         normalized = self._normalize_gcodes_path(remote_path)
         self._post("server/files/delete_file", {"path": f"{root}/{normalized}"})
         return True
+
+    def configure_u1_filament(self, ams_id: int, tray_id: int, material: str, subtype: str, color: str) -> None:
+        """Edit manual U1 metadata without taking ownership from RFID/Spoolman."""
+        if "snapmaker" not in self.printer_model.lower() or "u1" not in self.printer_model.lower():
+            raise NotImplementedError("Filament configuration is not supported for this Moonraker printer")
+        if ams_id != 0 or tray_id not in range(4):
+            raise ValueError("U1 filament slot must be 0 through 3 in feeder unit 0")
+        color = color.removeprefix("#")
+        if not re.fullmatch(r"[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?", color):
+            raise ValueError("Filament color must be RGB or RGBA hexadecimal")
+
+        # Klipper parses quoted extended parameters; reject command delimiters.
+        def quoted(value: str) -> str:
+            if not value or len(value) > 128 or any(c in value for c in '\n\r;"\\'):
+                raise ValueError("Invalid filament material, subtype, or vendor")
+            return f'"{value}"'
+
+        material_arg = quoted(material.strip())
+        subtype_arg = quoted(subtype.strip() or material.strip())
+        status = self._query_objects(["print_task_config"])
+        config = status.get("print_task_config")
+        if not isinstance(config, dict):
+            raise NotImplementedError("U1 filament configuration status is unavailable")
+        if (
+            _snapmaker_list_value(config, "filament_official", tray_id)
+            or (_safe_int(_snapmaker_list_value(config, "filament_spool_id", tray_id)) or 0) > 0
+        ):
+            raise PermissionError("This slot is managed by RFID or native Spoolman; edit it in the U1 Filament Manager")
+        vendor = _snapmaker_clean_text(_snapmaker_list_value(config, "filament_vendor", tray_id)) or "Generic"
+        script = (
+            f"SET_PRINT_FILAMENT_CONFIG CONFIG_EXTRUDER={tray_id} VENDOR={quoted(vendor)} "
+            f"FILAMENT_TYPE={material_arg} FILAMENT_SUBTYPE={subtype_arg} FILAMENT_COLOR_RGBA={color.upper()}"
+        )
+        # Do not use send_gcode's timeout-as-success fallback for a metadata edit.
+        self._post("printer/gcode/script", {"script": script})
+        self.request_status_update()
 
     def send_gcode(self, script: str) -> bool:
         if not script.strip():

@@ -1,3 +1,4 @@
+import asyncio
 import io
 import json
 import logging
@@ -3539,6 +3540,25 @@ async def get_filament_requirements(
                                     "used_in_plate": True,
                                 }
                             )
+
+            # Sliced Orca/Snapmaker files may have usage only in the G-code footer.
+            if not filaments:
+                from backend.app.utils.threemf_tools import extract_filament_usage_from_3mf
+
+                usage = await asyncio.to_thread(extract_filament_usage_from_3mf, file_path, plate_id)
+                filaments = [
+                    {
+                        "slot_id": item["slot_id"],
+                        "type": item.get("type", ""),
+                        "color": item.get("color", ""),
+                        "used_grams": item["used_g"],
+                        "used_meters": 0,
+                        "tray_info_idx": "",
+                        "used_in_plate": True,
+                    }
+                    for item in usage
+                    if item.get("used_g", 0) > 0
+                ]
 
             # Unsliced project files: see library.py for full rationale.
             # Return the FULL project_settings.config slot list with a

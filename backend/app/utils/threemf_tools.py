@@ -423,10 +423,11 @@ def extract_filament_usage_from_3mf(file_path: Path, plate_id: int | None = None
     filament_usage = []
     try:
         with zipfile.ZipFile(file_path, "r") as zf:
-            if "Metadata/slice_info.config" not in zf.namelist():
-                return []
-
-            content = zf.read("Metadata/slice_info.config").decode()
+            content = (
+                zf.read("Metadata/slice_info.config").decode()
+                if "Metadata/slice_info.config" in zf.namelist()
+                else "<config/>"
+            )
             root = ET.fromstring(content)
 
             if plate_id is not None:
@@ -481,6 +482,18 @@ def extract_filament_usage_from_3mf(file_path: Path, plate_id: int | None = None
     except Exception:
         pass  # Return whatever usage data was collected before the error
 
+    if not any(item.get("used_g", 0) > 0 for item in filament_usage):
+        # Orca/Snapmaker exports can omit slice_info filament entries entirely.
+        # Reuse the bounded G-code footer parser, preserving logical tool indices.
+        from backend.app.services.archive import ThreeMFParser
+
+        try:
+            parser = ThreeMFParser(file_path, plate_number=plate_id)
+            with zipfile.ZipFile(file_path) as zf:
+                parser._parse_gcode_header(zf)
+            return parser.metadata.get("filament_slots", filament_usage)
+        except (OSError, zipfile.BadZipFile):
+            pass
     return filament_usage
 
 
