@@ -71,3 +71,26 @@ async def test_transport_failure_is_not_success(async_client, client_u1):
     )
     assert response.status_code == 502
     client_u1.request_status_update.assert_not_called()
+
+
+async def test_status_exposes_native_inventory(async_client, printer_factory, client_u1):
+    printer = await printer_factory(model="Snapmaker U1", provider="moonraker")
+    status = _moonraker_status_with_snapmaker_u1()
+    status["print_task_config"]["filament_spool_id"] = [38, 36, 31, 27]
+    client_u1.state.connected = True
+    client_u1._post.side_effect = lambda path, payload: {
+        "id": int(payload["path"].split("/")[-1]),
+        "remaining_weight": 0,
+        "initial_weight": 500,
+        "filament": {"name": "Matte Black", "vendor": {"name": "SnapSpeed"}},
+    }
+    client_u1._apply_snapmaker_u1_status(status)
+    response = await async_client.get(f"/api/v1/printers/{printer.id}/status")
+    assert response.status_code == 200
+    trays = response.json()["ams"][0]["tray"]
+    assert [t["spoolman_spool_id"] for t in trays] == [38, 36, 31, 27]
+    assert trays[0]["remaining_weight"] == 0
+    assert trays[0]["initial_weight"] == 500
+    assert trays[0]["spoolman_filament_name"] == "Matte Black"
+    assert trays[0]["spoolman_vendor"] == "SnapSpeed"
+    assert trays[0]["native_spoolman"] is True

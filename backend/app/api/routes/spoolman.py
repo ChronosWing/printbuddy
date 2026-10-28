@@ -301,6 +301,9 @@ async def sync_printer_ams(
             if not isinstance(tray_data, dict):
                 continue
 
+            # Native U1 inventory is read-only, and is not an empty slot.
+            if tray_data.get("native_spoolman") is True:
+                continue
             tray_id_raw = int(tray_data.get("id", 0))
             tray = client.parse_ams_tray(ams_id, tray_data)
             if not tray:
@@ -503,6 +506,9 @@ async def sync_all_printers(
                 if not isinstance(tray_data, dict):
                     continue
 
+                # Native U1 inventory is read-only, and is not an empty slot.
+                if tray_data.get("native_spoolman") is True:
+                    continue
                 tray_id_raw = int(tray_data.get("id", 0))
                 tray = client.parse_ams_tray(ams_id, tray_data)
                 if not tray:

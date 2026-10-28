@@ -4590,7 +4590,8 @@ function PrinterCard({
                                   }
                                   return null;
                                 })();
-                                const { fillLevel: effectiveFill, fillSource } = resolveTrayFillLevel({
+                                const nativeSpoolman = isSnapmakerU1Unit && tray?.native_spoolman === true;
+                                const { fillLevel: fallbackFill, fillSource: fallbackSource } = resolveTrayFillLevel({
                                   spoolmanFill,
                                   slotSpoolFill,
                                   inventoryFill,
@@ -4599,9 +4600,13 @@ function PrinterCard({
                                   isCfsUnit,
                                 });
 
+                                const effectiveFill = nativeSpoolman ? (tray.remain >= 0 ? tray.remain : null) : fallbackFill;
+                                const fillSource = nativeSpoolman ? 'spoolman' as const : fallbackSource;
+
                                 // Build filament data for hover card
                                 const filamentData = tray?.tray_type ? {
-                                  vendor: (!isCfsUnit && isBambuLabSpool(tray) ? 'Bambu Lab' : 'Generic') as 'Bambu Lab' | 'Generic',
+                                  vendor: (nativeSpoolman && tray.spoolman_vendor) || (!isCfsUnit && isBambuLabSpool(tray) ? 'Bambu Lab' : 'Generic'),
+                                  remainingWeightGrams: nativeSpoolman ? tray.remaining_weight ?? null : undefined,
                                   // Spoolman spool name wins over cloud lookup so a slot bound to
                                   // a Spoolman spool shows that spool's preset name (e.g. "Devil
                                   // Design PLA") instead of whatever the printer's filament_id
@@ -4611,7 +4616,7 @@ function PrinterCard({
                                   // the hover card shows "Devil Design PLA Basic" rather than the
                                   // vendor-less form. Strip the "@<printer>..." suffix that
                                   // BambuStudio appends to user-preset names.
-                                  profile: slotPreset?.preset_name || (slotSpoolForFill ? [slotSpoolForFill.brand, slotSpoolForFill.slicer_filament_name?.split('@')[0].trim() || slotSpoolForFill.material].filter(Boolean).join(' ').trim() : null) || inventoryAssignment?.spool?.slicer_filament_name || cloudInfo?.name || tray.tray_sub_brands || tray.tray_type,
+                                  profile: nativeSpoolman ? (tray.spoolman_filament_name || tray.tray_sub_brands || tray.tray_type) : slotPreset?.preset_name || (slotSpoolForFill ? [slotSpoolForFill.brand, slotSpoolForFill.slicer_filament_name?.split('@')[0].trim() || slotSpoolForFill.material].filter(Boolean).join(' ').trim() : null) || inventoryAssignment?.spool?.slicer_filament_name || cloudInfo?.name || tray.tray_sub_brands || tray.tray_type,
                                   colorName: getColorName(tray.tray_color || ''),
                                   colorHex: tray.tray_color || null,
                                   kFactor: formatKValue(tray.k),
@@ -4641,6 +4646,13 @@ function PrinterCard({
                                     <div className="text-[9px] text-white font-bold truncate">
                                       {tray?.tray_type || t('ams.slotEmpty')}
                                     </div>
+                                    {isSnapmakerU1Unit && (
+                                      <div className="text-[9px] text-bambu-gray tabular-nums" data-testid={`u1-weight-${slotIdx}`}
+                                        title={[tray?.spoolman_vendor, tray?.spoolman_filament_name].filter(Boolean).join(' · ')}>
+                                        {tray?.remaining_weight != null && Number.isFinite(tray.remaining_weight)
+                                          ? `${Math.round(tray.remaining_weight * 10) / 10} g` : '—'}
+                                      </div>
+                                    )}
                                     {snapmakerLoadState && (
                                       <div
                                         className={`mt-1 px-1 py-0.5 rounded border text-[8px] font-semibold leading-none truncate ${snapmakerLoadState.className}`}

@@ -721,6 +721,12 @@ async def get_printer_status(
                         channel_action_state=tray_data.get("channel_action_state"),
                         channel_error=tray_data.get("channel_error"),
                         filament_source=tray_data.get("filament_source"),
+                        remaining_weight=tray_data.get("remaining_weight"),
+                        initial_weight=tray_data.get("initial_weight"),
+                        spoolman_spool_id=tray_data.get("spoolman_spool_id"),
+                        spoolman_filament_name=tray_data.get("spoolman_filament_name"),
+                        spoolman_vendor=tray_data.get("spoolman_vendor"),
+                        native_spoolman=tray_data.get("native_spoolman"),
                     )
                 )
             # Prefer humidity_raw (percentage) over humidity (index 1-5)

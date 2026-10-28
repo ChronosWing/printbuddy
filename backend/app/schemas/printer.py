@@ -310,6 +310,12 @@ class AMSTray(BaseModel):
     channel_action_state: str | None = None
     channel_error: str | None = None
     filament_source: str | None = None
+    remaining_weight: float | None = None
+    initial_weight: float | None = None
+    spoolman_spool_id: int | None = None
+    spoolman_filament_name: str | None = None
+    spoolman_vendor: str | None = None
+    native_spoolman: bool | None = None
 
 
 class AMSUnit(BaseModel):

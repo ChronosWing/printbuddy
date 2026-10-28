@@ -184,6 +184,20 @@ async def report_spoolman_usage(
 
     await _apply_metadata_to_archive(metadata, archive_id, db)
 
+    # A single-spool estimate cannot own usage for native U1-managed tools.
+    from backend.app.services.printer_manager import printer_manager
+
+    state = printer_manager.get_status(printer_id)
+    raw = getattr(state, "raw_data", None)
+    if isinstance(raw, dict) and any(
+        tray.get("native_spoolman") is True
+        for unit in raw.get("ams", [])
+        if isinstance(unit, dict)
+        for tray in unit.get("tray", [])
+        if isinstance(tray, dict)
+    ):
+        return []
+
     weight_used = metadata.estimated_weight_grams
     if weight_used <= 0:
         return []

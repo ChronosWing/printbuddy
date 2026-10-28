@@ -14,6 +14,8 @@ This fork modifies U1 filament status serialization and colors, provider-specifi
 filament editing, sliced 3MF usage parsing and API responses, and native Spoolman
 ownership handling. Regression tests and offline development instructions are
 included. See `docs/development/snapmaker-u1.md` for scope and validation limits.
+Native Spoolman inventory reads, grams display, REST/live-state fields, caching,
+and exclusions from legacy AMS weight writes were added on 2026-10-28.
 Original Printbuddy and Bambuddy attribution and license text are retained.
 
 ## Modified files

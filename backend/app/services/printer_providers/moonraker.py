@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import time
 from dataclasses import dataclass, field
@@ -228,6 +229,19 @@ def _snapmaker_list_value(config: dict[str, Any], key: str, index: int) -> Any:
     return None
 
 
+def _snapmaker_u1_spool_id(value: Any) -> int | None:
+    # Never truncate fractional IDs or interpret bool as spool 1.
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    if isinstance(value, str) and not re.fullmatch(r"[0-9]+", value):
+        return None
+    try:
+        spool_id = int(value)
+    except ValueError:
+        return None
+    return spool_id if spool_id > 0 else None
+
+
 def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> dict[str, Any]:
     """Extract real U1 slot metadata from print_task_config arrays.
 
@@ -256,7 +270,7 @@ def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> 
 
     source = "unset"
     if material:
-        spool_id = _safe_int(_snapmaker_list_value(config, "filament_spool_id", index)) or 0
+        spool_id = _snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", index)) or 0
         source = "spoolman" if spool_id > 0 else ("rfid" if official else "manual")
 
     return {
@@ -563,6 +577,7 @@ class MoonrakerPrinterClient:
         self._has_status_sample = False
         self._last_bed_temp: float | None = None
         self._current_print_started_at: float | None = None
+        self._u1_spool_cache: dict[int, tuple[float, dict[str, Any] | None]] = {}
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -1015,6 +1030,80 @@ class MoonrakerPrinterClient:
         if isinstance(filament_rack, dict):
             self.state.raw_data["filament_rack"] = filament_rack
 
+    def _u1_spool_inventory(self, spool_id: int) -> dict[str, Any] | None:
+        """Read inventory through the existing Moonraker connection only.
+
+        The HTTP POST is Moonraker's proxy transport; the proxied operation is
+        always GET. Cache successes for 60 seconds and failures for 15 seconds.
+        Failed refreshes discard old weight rather than showing stale quantities.
+        """
+        now = time.monotonic()
+        cached = self._u1_spool_cache.get(spool_id)
+        if cached and now < cached[0]:
+            return cached[1]
+        inventory = None
+        try:
+            result = self._post(
+                "server/spoolman/proxy",
+                {
+                    "request_method": "GET",
+                    "path": f"/v1/spool/{spool_id}",
+                },
+            )
+            if _snapmaker_u1_spool_id(result.get("id")) == spool_id:
+
+                def grams(value: Any) -> float | None:
+                    if isinstance(value, bool):
+                        return None
+                    number = _safe_float(value)
+                    return number if number is not None and math.isfinite(number) and number >= 0 else None
+
+                filament = result.get("filament")
+                filament = filament if isinstance(filament, dict) else {}
+                initial = grams(result.get("initial_weight"))
+                if initial is None or initial == 0:
+                    initial = grams(filament.get("weight"))
+                vendor = filament.get("vendor")
+                inventory = {
+                    "remaining_weight": grams(result.get("remaining_weight")),
+                    "initial_weight": initial,
+                    "spoolman_filament_name": _snapmaker_clean_text(filament.get("name")),
+                    "spoolman_vendor": _snapmaker_clean_text(vendor.get("name")) if isinstance(vendor, dict) else "",
+                }
+        except (httpx.HTTPError, ValueError, TypeError):
+            # Optional inventory must never make the printer offline or erase
+            # authoritative U1 material, color, or load state.
+            pass
+        self._u1_spool_cache[spool_id] = (time.monotonic() + (60 if inventory is not None else 15), inventory)
+        return inventory
+
+    def _apply_u1_spool_inventory(self, slots: dict[int, dict[str, Any]], config: dict[str, Any]) -> None:
+        if "snapmaker" not in self.printer_model.lower() or "u1" not in self.printer_model.lower():
+            return
+        assignments = {
+            index: _snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", index)) for index in slots
+        }
+        active_ids = {spool_id for spool_id in assignments.values() if spool_id is not None}
+        self._u1_spool_cache = {key: value for key, value in self._u1_spool_cache.items() if key in active_ids}
+        for index, spool_id in assignments.items():
+            slot = slots[index]
+            slot["spoolman_spool_id"] = spool_id
+            slot["native_spoolman"] = spool_id is not None
+            if spool_id is None:
+                continue
+            # Do not substitute a feeder estimate or a differently assigned
+            # PrintBuddy spool if this native inventory record is unavailable.
+            slot.update(remaining_weight=None, initial_weight=None, remain=None)
+            if not self.state.connected:
+                continue
+            inventory = self._u1_spool_inventory(spool_id)
+            if inventory is None:
+                continue
+            slot.update(inventory)
+            remaining, initial = inventory["remaining_weight"], inventory["initial_weight"]
+            if remaining is not None and initial is not None and initial > 0:
+                slot["remain"] = max(0, min(100, round(remaining / initial * 100)))
+
     def _apply_snapmaker_u1_status(self, status: dict[str, Any]) -> None:
         if not isinstance(status, dict):
             return
@@ -1094,7 +1183,8 @@ class MoonrakerPrinterClient:
                     "filament_sku": task_metadata.get("sku"),
                     "filament_exist": task_metadata.get("exists"),
                     "native_spoolman": (
-                        _safe_int(_snapmaker_list_value(task_config, "filament_spool_id", extruder_index)) or 0
+                        _snapmaker_u1_spool_id(_snapmaker_list_value(task_config, "filament_spool_id", extruder_index))
+                        or 0
                     )
                     > 0,
                     "raw": values,
@@ -1139,6 +1229,7 @@ class MoonrakerPrinterClient:
                 slot["vendor"] = metadata["vendor"]
             slot["raw_spool"] = values
 
+        self._apply_u1_spool_inventory(feed_slots, task_config)
         if feed_slots:
             trays = [feed_slots[index] for index in sorted(feed_slots)]
             active_slots = [tray["slot"] for tray in trays if tray.get("active")]
@@ -1247,6 +1338,7 @@ class MoonrakerPrinterClient:
 
     def disconnect(self, timeout: float = 0) -> None:  # noqa: ARG002 - kept for Bambu client compatibility
         self.state.connected = False
+        self._u1_spool_cache.clear()
 
     def check_staleness(self) -> bool:
         try:
@@ -1407,7 +1499,7 @@ class MoonrakerPrinterClient:
             raise NotImplementedError("U1 filament configuration status is unavailable")
         if (
             _snapmaker_list_value(config, "filament_official", tray_id)
-            or (_safe_int(_snapmaker_list_value(config, "filament_spool_id", tray_id)) or 0) > 0
+            or (_snapmaker_u1_spool_id(_snapmaker_list_value(config, "filament_spool_id", tray_id)) or 0) > 0
         ):
             raise PermissionError("This slot is managed by RFID or native Spoolman; edit it in the U1 Filament Manager")
         vendor = _snapmaker_clean_text(_snapmaker_list_value(config, "filament_vendor", tray_id)) or "Generic"

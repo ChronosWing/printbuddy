@@ -1193,6 +1193,10 @@ async def sync_spoolman_ams_weights(
             skipped += 1
             continue
 
+        if tray.get("native_spoolman") is True:
+            skipped += 1
+            continue
+
         remain_raw = tray.get("remain")
         if remain_raw is None:
             logger.debug(

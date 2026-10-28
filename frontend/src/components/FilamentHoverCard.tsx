@@ -7,7 +7,8 @@ import { AssignSpoolIcon } from './icons/AssignSpoolIcon';
 import { isLightColor } from '../utils/colors';
 
 interface FilamentData {
-  vendor: 'Bambu Lab' | 'Generic';
+  vendor: string;
+  remainingWeightGrams?: number | null;
   profile: string;
   colorName: string;
   colorHex: string | null;
@@ -172,7 +173,8 @@ export function FilamentHoverCard({ data, children, disabled, className = '', sp
   };
 
   const colorHex = data.colorHex ? `#${data.colorHex.replace('#', '')}` : null;
-  const assignedRemainingWeight = inventory?.assignedSpool?.remainingWeightGrams ?? null;
+  const assignedRemainingWeight = data.remainingWeightGrams !== undefined
+    ? data.remainingWeightGrams : inventory?.assignedSpool?.remainingWeightGrams ?? null;
 
   return (
     <div
@@ -234,7 +236,7 @@ export function FilamentHoverCard({ data, children, disabled, className = '', sp
                   ? 'bg-black/60 text-white'
                   : 'bg-black/50 text-white/90'}
               `}>
-                {data.vendor === 'Bambu Lab' ? 'BBL' : 'GEN'}
+                {data.vendor === 'Bambu Lab' ? 'BBL' : data.vendor === 'Generic' ? 'GEN' : data.vendor}
               </div>
             </div>
 
@@ -269,8 +271,8 @@ export function FilamentHoverCard({ data, children, disabled, className = '', sp
                   </span>
                   <span className="text-xs text-white font-semibold flex items-center gap-1">
                     <span>{data.fillLevel !== null ? `${data.fillLevel}%` : '—'}</span>
-                    {assignedRemainingWeight !== null && data.fillLevel !== null && (
-                      <span className="text-[9px] text-bambu-gray font-normal">• {assignedRemainingWeight}g</span>
+                    {assignedRemainingWeight !== null && (data.remainingWeightGrams !== undefined || data.fillLevel !== null) && (
+                      <span className="text-[9px] text-bambu-gray font-normal">• {data.remainingWeightGrams !== undefined ? Math.round(assignedRemainingWeight * 10) / 10 : assignedRemainingWeight}g</span>
                     )}
                   </span>
                 </div>

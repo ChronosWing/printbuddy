@@ -363,3 +363,19 @@ class TestSyncAmsEdgeCases:
         body = resp.json()
         assert body["synced"] == 1
         assert body["skipped"] == 0
+
+
+async def test_native_u1_inventory_is_never_adjusted(async_client, sync_settings, test_printer, slot_assignment):
+    client = _make_spoolman_client()
+    state = _make_printer_state(remain=94)
+    state.raw_data["ams"][0]["tray"][0].update(native_spoolman=True, remaining_weight=468.167)
+    with (
+        patch("backend.app.api.routes.spoolman_inventory._get_client", AsyncMock(return_value=client)),
+        patch("backend.app.api.routes.spoolman_inventory.printer_manager") as manager,
+    ):
+        manager.get_status.return_value = state
+        response = await async_client.post("/api/v1/spoolman/inventory/sync-ams-weights")
+    assert response.status_code == 200
+    assert response.json()["synced"] == 0
+    assert response.json()["skipped"] == 1
+    client.update_spool_full.assert_not_called()

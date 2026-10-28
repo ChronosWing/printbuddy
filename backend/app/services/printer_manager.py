@@ -932,7 +932,7 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
                         "tray_sub_brands": tray.get("tray_sub_brands"),
                         "tray_id_name": tray.get("tray_id_name"),
                         "tray_info_idx": tray.get("tray_info_idx"),
-                        "remain": tray.get("remain", 0),
+                        "remain": tray.get("remain", 0) if tray.get("remain", 0) is not None else -1,
                         "k": k_value,
                         "cali_idx": cali_idx,
                         "tag_uid": tag_uid,
@@ -942,6 +942,26 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
                         "drying_temp": tray.get("drying_temp"),
                         "drying_time": tray.get("drying_time"),
                         "state": state_val,
+                        **{
+                            key: tray[key]
+                            for key in (
+                                "active",
+                                "loaded_to_feeder",
+                                "loaded_to_extruder",
+                                "filament_detected",
+                                "channel_state",
+                                "channel_action_state",
+                                "channel_error",
+                                "filament_source",
+                                "remaining_weight",
+                                "initial_weight",
+                                "spoolman_spool_id",
+                                "spoolman_filament_name",
+                                "spoolman_vendor",
+                                "native_spoolman",
+                            )
+                            if key in tray
+                        },
                     }
                 )
             # Prefer humidity_raw (actual percentage) over humidity (index 1-5)
