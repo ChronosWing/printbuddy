@@ -1657,6 +1657,10 @@ async def start_printer_file(
     ams_mapping: list[int] | None = Query(default=None),
     bed_levelling: bool | None = Query(default=None),
     print_platform_type: int | None = Query(default=None, ge=0, le=1),
+    u1_map_table: str | None = Query(default=None),
+    flow_calibrate: bool = Query(default=False),
+    flow_calibrate_extruders: list[int] | None = Query(default=None),
+    time_lapse_camera: bool = Query(default=False),
     _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_CONTROL),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1667,6 +1671,12 @@ async def start_printer_file(
         raise HTTPException(404, "Printer not found")
 
     provider_client = _provider_for_printer(printer)
+    if isinstance(provider_client, MoonrakerPrinterClient) and provider_client._is_snapmaker_u1():
+        # The live client has the loaded-filament state needed to check mapping.
+        live_client = printer_manager.get_client(printer_id)
+        if not isinstance(live_client, MoonrakerPrinterClient) or not live_client.state.connected:
+            raise HTTPException(503, "Printer is unavailable")
+        provider_client = live_client
     direct_file_info = None
     if provider_client is not None:
         get_file_info = getattr(provider_client, "get_file_info", None)
@@ -1685,7 +1695,22 @@ async def start_printer_file(
             start_options["storage"] = storage
         if ams_mapping is not None:
             start_options["ams_mapping"] = ams_mapping
-        success = provider_client.start_print(path, **start_options)
+        if isinstance(provider_client, MoonrakerPrinterClient) and provider_client._is_snapmaker_u1():
+            try:
+                start_options["u1_map_table"] = json.loads(u1_map_table) if u1_map_table is not None else None
+            except json.JSONDecodeError as exc:
+                raise HTTPException(400, "Invalid U1 filament mapping") from exc
+            start_options["flow_calibrate"] = flow_calibrate
+            start_options["flow_calibrate_extruders"] = flow_calibrate_extruders or []
+            start_options["time_lapse_camera"] = time_lapse_camera
+        try:
+            success = provider_client.start_print(path, **start_options)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(502, f"Printer rejected print start: HTTP {exc.response.status_code}") from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(503, "Printer is unavailable") from exc
     else:
         success = printer_manager.start_print(printer_id, path)
 
@@ -1702,6 +1727,80 @@ async def start_printer_file(
                 direct_file_info.get("estimated_time_seconds"),
             )
     return {"status": "started", "path": path}
+
+
+@router.get("/{printer_id}/files/metadata")
+async def get_moonraker_printer_file_metadata(
+    printer_id: int,
+    path: str,
+    _=RequirePermissionIfAuthEnabled(Permission.PRINTERS_FILES),
+    db: AsyncSession = Depends(get_db),
+):
+    """Expose the selected U1 G-code's Moonraker slicer metadata for print setup."""
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+    client = _provider_for_printer(printer)
+    if not isinstance(client, MoonrakerPrinterClient) or not client._is_snapmaker_u1():
+        raise HTTPException(400, "U1 file metadata is unavailable for this printer")
+    normalized = client._normalize_gcodes_path(path)
+    if not normalized.lower().endswith(".gcode") or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        raise HTTPException(400, "Invalid U1 G-code path")
+    try:
+        metadata = client.get_file_metadata(normalized)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            exc.response.status_code if exc.response.status_code == 404 else 502, "U1 file metadata unavailable"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "Printer is unavailable") from exc
+    from backend.app.services.printer_providers.moonraker import _u1_used_logical_tools
+
+    return {"metadata": metadata, "used_tools": _u1_used_logical_tools(metadata)}
+
+
+@router.get("/{printer_id}/files/thumbnail")
+async def get_moonraker_printer_file_thumbnail(
+    printer_id: int,
+    path: str,
+    _=RequireCameraStreamTokenIfAuthEnabled,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Printer).where(Printer.id == printer_id))
+    printer = result.scalar_one_or_none()
+    if not printer:
+        raise HTTPException(404, "Printer not found")
+    client = _provider_for_printer(printer)
+    if not isinstance(client, MoonrakerPrinterClient) or not client._is_snapmaker_u1():
+        raise HTTPException(400, "U1 thumbnail is unavailable for this printer")
+    normalized = client._normalize_gcodes_path(path)
+    if not normalized.lower().endswith(".gcode") or any(part in {"", ".", ".."} for part in normalized.split("/")):
+        raise HTTPException(400, "Invalid U1 G-code path")
+    try:
+        metadata = client.get_file_metadata(normalized)
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(404 if exc.response.status_code == 404 else 502, "U1 thumbnail unavailable") from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(503, "Printer is unavailable") from exc
+    thumbnails = metadata.get("thumbnails") if isinstance(metadata, dict) else None
+    if isinstance(thumbnails, list):
+        for item in sorted(
+            (thumb for thumb in thumbnails if isinstance(thumb, dict)),
+            key=lambda thumb: (thumb.get("width") or 0) * (thumb.get("height") or 0),
+            reverse=True,
+        ):
+            relative = item.get("relative_path")
+            if not isinstance(relative, str) or not relative or relative.startswith("/") or ".." in relative.split("/"):
+                continue
+            remote = posixpath.normpath(posixpath.join(posixpath.dirname(normalized), relative))
+            try:
+                image = await asyncio.to_thread(client.download_file, remote)
+            except httpx.HTTPError:
+                continue
+            if image:
+                return Response(content=image, media_type="image/png")
+    raise HTTPException(404, "U1 thumbnail not available")
 
 
 @router.get("/{printer_id}/files/download")
@@ -3462,7 +3561,12 @@ async def set_chamber_light(
     if not callable(set_chamber_light_method):
         raise HTTPException(400, "Chamber light control is not supported by this printer provider")
 
-    success = set_chamber_light_method(on)
+    try:
+        success = set_chamber_light_method(on)
+    except NotImplementedError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(503, "Printer is unavailable") from exc
     if not success:
         raise HTTPException(500, "Failed to control chamber light")
 

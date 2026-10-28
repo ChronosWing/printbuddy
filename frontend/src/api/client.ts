@@ -463,7 +463,7 @@ export interface PrinterStatus {
   // Print speed level (1=silent, 2=standard, 3=sport, 4=ludicrous)
   speed_level: number;
   // Chamber light on/off
-  chamber_light: boolean;
+  chamber_light: boolean | null;
   // Active extruder for dual nozzle (0=right, 1=left)
   active_extruder: number;
   // AMS mapping - which AMS is connected to which nozzle
@@ -4024,17 +4024,25 @@ export const api = {
   startPrinterFile: (
     printerId: number,
     path: string,
-    options?: { bed_levelling?: boolean; print_platform_type?: 0 | 1; storage?: string | null; ams_mapping?: number[] }
+    options?: { bed_levelling?: boolean; print_platform_type?: 0 | 1; storage?: string | null; ams_mapping?: number[]; u1_map_table?: number[][]; flow_calibrate?: boolean; flow_calibrate_extruders?: number[]; time_lapse_camera?: boolean }
   ) => {
     const params = new URLSearchParams({ path });
     if (options?.storage) params.set('storage', options.storage);
     if (options?.bed_levelling !== undefined) params.set('bed_levelling', String(options.bed_levelling));
     if (options?.print_platform_type !== undefined) params.set('print_platform_type', String(options.print_platform_type));
     options?.ams_mapping?.forEach((trayId) => params.append('ams_mapping', String(trayId)));
+    if (options?.u1_map_table) params.set('u1_map_table', JSON.stringify(options.u1_map_table));
+    if (options?.flow_calibrate !== undefined) params.set('flow_calibrate', String(options.flow_calibrate));
+    options?.flow_calibrate_extruders?.forEach((index) => params.append('flow_calibrate_extruders', String(index)));
+    if (options?.time_lapse_camera !== undefined) params.set('time_lapse_camera', String(options.time_lapse_camera));
     return request<{ status: string; path: string }>(`/printers/${printerId}/files/start?${params.toString()}`, {
       method: 'POST',
     });
   },
+  getU1PrinterFileMetadata: (printerId: number, path: string) =>
+    request<{ metadata: Record<string, unknown>; used_tools: number[] }>(`/printers/${printerId}/files/metadata?path=${encodeURIComponent(path)}`),
+  getU1PrinterFileThumbnailUrl: (printerId: number, path: string) =>
+    withStreamToken(`${API_BASE}/printers/${printerId}/files/thumbnail?path=${encodeURIComponent(path)}`),
   deletePrinterFile: (printerId: number, path: string, storage?: string | null) => {
     const params = new URLSearchParams({ path });
     if (storage) params.set('storage', storage);

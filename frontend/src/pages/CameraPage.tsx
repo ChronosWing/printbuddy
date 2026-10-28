@@ -656,7 +656,7 @@ export function CameraPage() {
             onClick={() => chamberLightMutation.mutate(!status?.chamber_light)}
             disabled={!status?.connected || chamberLightMutation.isPending || !hasPermission('printers:control')}
             className={`p-1.5 rounded disabled:opacity-50 ${status?.chamber_light ? 'bg-yellow-500/20 hover:bg-yellow-500/30' : 'hover:bg-bambu-dark-tertiary'}`}
-            title={!hasPermission('printers:control') ? t('printers.permission.noControl') : t('camera.chamberLight')}
+            title={!hasPermission('printers:control') ? t('printers.permission.noControl') : status?.chamber_light == null ? `${t('camera.chamberLight')}: unknown` : t('camera.chamberLight')}
           >
             <ChamberLight on={status?.chamber_light ?? false} className="w-4 h-4" />
           </button>

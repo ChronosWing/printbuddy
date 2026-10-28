@@ -37,6 +37,8 @@ export interface PrintModalProps {
   /** Delete the LibraryFile after dispatch — used by the Printers-page Direct-Print flow
    *  so transient uploads don't linger in File Manager. Only applies to library-file prints. */
   cleanupLibraryAfterDispatch?: boolean;
+  /** U1 G-code already stored on the printer; uses the same print dialog shell. */
+  u1PrinterFile?: { printerId: number; path: string; storage?: string | null };
 }
 
 /**

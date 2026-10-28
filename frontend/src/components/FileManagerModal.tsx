@@ -302,12 +302,14 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
   const [downloadProgress, setDownloadProgress] = useState<{ current: number; total: number } | null>(null);
   const [viewerFile, setViewerFile] = useState<{ path: string; name: string } | null>(null);
   const [elegooStartFile, setElegooStartFile] = useState<{ path: string; name: string } | null>(null);
+  const [u1PrintFile, setU1PrintFile] = useState<{ path: string; name: string } | null>(null);
   const [filePendingSpoolConfirmation, setFilePendingSpoolConfirmation] = useState<{ path: string; name: string; options?: { bed_levelling?: boolean; print_platform_type?: ElegooPrintPlatformType } } | null>(null);
   const [elegooHeatedBedLevelling, setElegooHeatedBedLevelling] = useState(true);
   const [elegooPrintPlatformType, setElegooPrintPlatformType] = useState<ElegooPrintPlatformType>(0);
   const isPrusaPrinter = printerProvider === 'prusalink' || printerProvider === 'prusaconnect';
   const isPrusaLinkPrinter = printerProvider === 'prusalink';
   const isElegooSDCPPrinter = isElegooCc1Printer(printerProvider, printerModel);
+  const isSnapmakerU1 = (printerProvider === 'klipper' || printerProvider === 'mainsail' || printerProvider === 'fluidd') && /snapmaker\s*u1/i.test(printerModel || '');
 
   // Close on Escape key
   useEffect(() => {
@@ -535,6 +537,14 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
   const handlePrintSelectedFile = async () => {
     const file = selectedPrintableFile();
     if (!file) return;
+    if (isSnapmakerU1) {
+      if (!file.name.toLowerCase().endsWith('.gcode')) {
+        showToast('Select a sliced .gcode file for the Snapmaker U1', 'error');
+        return;
+      }
+      setU1PrintFile(file);
+      return;
+    }
     if (isElegooSDCPPrinter) {
       setElegooStartFile(file);
       return;
@@ -1038,6 +1048,16 @@ export function FileManagerModal({ printerId, printerName, printerProvider, prin
             setSelectedFiles(new Set());
             showToast('Added printer file to queue');
           }}
+        />
+      )}
+      {u1PrintFile && (
+        <PrintModal
+          mode="reprint"
+          archiveName={u1PrintFile.name}
+          initialSelectedPrinterIds={[printerId]}
+          u1PrinterFile={{ printerId, path: u1PrintFile.path, storage: activeStorage }}
+          onClose={() => setU1PrintFile(null)}
+          onSuccess={() => setSelectedFiles(new Set())}
         />
       )}
     </div>

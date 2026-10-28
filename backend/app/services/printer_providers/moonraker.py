@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -46,7 +47,7 @@ class MoonrakerPrinterState:
     stg: list[int] = field(default_factory=list)
     airduct_mode: int = 0
     speed_level: int = 2
-    chamber_light: bool = False
+    chamber_light: bool | None = None
     active_extruder: int = 0
     tray_now: int = 255
     ams_status_main: int = 0
@@ -135,6 +136,112 @@ def _safe_float(value: Any) -> float | None:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _u1_used_logical_tools(metadata: dict[str, Any]) -> list[int]:
+    """Read actual slicer usage; never infer tools from empty metadata."""
+    for key in ("filament_weights", "filament_used_mm"):
+        values = metadata.get(key)
+        if isinstance(values, list):
+            used = [index for index, value in enumerate(values[:4]) if (_safe_float(value) or 0) > 0]
+            if used:
+                return used
+    referenced = metadata.get("referenced_tools")
+    if isinstance(referenced, list) and referenced:
+        indices = [_safe_int(value) for value in referenced]
+        if all(index is not None and 0 <= index < 4 for index in indices):
+            return sorted(set(indices))
+    return []
+
+
+def _u1_print_script(
+    filename: str,
+    metadata: dict[str, Any],
+    mapping: list[list[int]],
+    *,
+    bed_level: bool,
+    flow_calibrate: bool,
+    flow_calibrate_extruders: list[int],
+    time_lapse_camera: bool,
+) -> str:
+    if not filename or not filename.lower().endswith(".gcode") or any(char in filename for char in '\n\r;"\\'):
+        raise ValueError("A safe U1 G-code filename is required")
+    if any(part in {"", ".", ".."} for part in filename.split("/")):
+        raise ValueError("Invalid U1 G-code path")
+    used = _u1_used_logical_tools(metadata)
+    if not used:
+        raise ValueError("U1 file metadata does not identify used filament tools")
+    if not isinstance(mapping, list) or len(mapping) != len(used):
+        raise ValueError("Map each used logical filament to one physical toolhead")
+    if any(
+        not isinstance(pair, list) or len(pair) != 2 or any(type(value) is not int for value in pair)
+        for pair in mapping
+    ):
+        raise ValueError("Invalid U1 filament mapping")
+    ordered = sorted(mapping)
+    if [pair[0] for pair in ordered] != used or len({pair[1] for pair in ordered}) != len(ordered):
+        raise ValueError("U1 filament mapping must cover used tools without duplicate toolheads")
+    if any(not 0 <= pair[1] < 4 for pair in ordered):
+        raise ValueError("U1 physical toolhead must be 0 through 3")
+    if type(bed_level) is not bool or type(flow_calibrate) is not bool or type(time_lapse_camera) is not bool:
+        raise ValueError("Invalid U1 print option")
+    if not isinstance(flow_calibrate_extruders, list) or any(
+        type(value) is not int for value in flow_calibrate_extruders
+    ):
+        raise ValueError("Invalid U1 flow calibration toolheads")
+    physical = {pair[1] for pair in ordered}
+    if (
+        len(set(flow_calibrate_extruders)) != len(flow_calibrate_extruders)
+        or not set(flow_calibrate_extruders) <= physical
+    ):
+        raise ValueError("Flow calibration toolheads must be mapped and unique")
+    if not flow_calibrate and flow_calibrate_extruders:
+        raise ValueError("Flow calibration toolheads require flow calibration")
+
+    arguments = [
+        f'FILENAME="{filename}"',
+        f'BED_LEVEL="{int(bed_level)}"',
+        f'FLOW_CALIBRATE="{int(flow_calibrate)}"',
+        f'TIME_LAPSE_CAMERA="{int(time_lapse_camera)}"',
+        f'MAP_TABLE="{json.dumps(ordered)}"',
+    ]
+    if flow_calibrate:
+        arguments.append(f'FLOW_CALIBRATE_EXTRUDERS="{json.dumps(sorted(flow_calibrate_extruders))}"')
+    for source, target in (
+        ("line_width", "LINE_WIDTH"),
+        ("layer_height", "LAYER_HEIGHT"),
+    ):
+        value = _safe_float(metadata.get(source))
+        if value is not None and math.isfinite(value) and value > 0:
+            arguments.append(f'{target}="{value}"')
+    for source, target in (
+        ("filament_weights", "FILAMENT_USED_G"),
+        ("filament_used_mm", "FILAMENT_USED_MM"),
+        ("nozzle_diameter_list", "NOZZLE_DIAMETER_LIST"),
+        ("nozzle_temp", "NOZZLE_TEMP"),
+        ("filament_flow_ratio", "FILAMENT_FLOW_RATIO"),
+        ("filament_diameter", "FILAMENT_DIAMETER"),
+    ):
+        values = metadata.get(source)
+        if (
+            isinstance(values, list)
+            and values
+            and all(
+                (number := _safe_float(value)) is not None and math.isfinite(number) and number >= 0 for value in values
+            )
+        ):
+            arguments.append(f'{target}="{json.dumps([float(value) for value in values])}"')
+    filament_types = metadata.get("filament_type")
+    if (
+        isinstance(filament_types, list)
+        and filament_types
+        and all(
+            isinstance(value, str) and value and not any(char in value for char in "\n\r;\"'\\")
+            for value in filament_types
+        )
+    ):
+        arguments.append(f'FILAMENT_TYPE="{repr(filament_types)}"')
+    return "SDCARD_PRINT_FILE_WITH_PARAMETERS " + " ".join(arguments)
 
 
 def _list_value(values: Any, index: int, default: Any = None) -> Any:
@@ -1502,8 +1609,9 @@ class MoonrakerPrinterClient:
 
     def download_file(self, remote_path: str) -> bytes | None:
         normalized = self._normalize_gcodes_path(remote_path)
+        encoded = "/".join(quote(part, safe="") for part in normalized.split("/"))
         response = httpx.get(
-            urljoin(self.base_url, f"server/files/gcodes/{normalized}"),
+            urljoin(self.base_url, f"server/files/gcodes/{encoded}"),
             headers=self._headers,
             timeout=max(self.timeout, 60.0),
         )
@@ -1625,8 +1733,49 @@ class MoonrakerPrinterClient:
     def save_config(self) -> bool:
         return self.send_gcode("SAVE_CONFIG")
 
+    def _is_snapmaker_u1(self) -> bool:
+        model = self.printer_model.lower()
+        return "snapmaker" in model and "u1" in model
+
+    def set_chamber_light(self, on: bool) -> bool:
+        if not self._is_snapmaker_u1():
+            raise NotImplementedError("Chamber light control is not supported for this Moonraker printer")
+        self._post("printer/gcode/script", {"script": f"SET_LED LED=cavity_led WHITE={int(on)}"})
+        # The firmware does not report reliable LED brightness. This state is
+        # known only for this client session, after our own successful command.
+        self.state.chamber_light = on
+        return True
+
     def start_print(self, filename: str, plate_id: int = 1, **kwargs: Any) -> bool:  # noqa: ARG002
         normalized = self._normalize_gcodes_path(filename)
+        if self._is_snapmaker_u1():
+            metadata = self.get_file_metadata(normalized)
+            mapping = kwargs.get("u1_map_table")
+            script = _u1_print_script(
+                normalized,
+                metadata,
+                mapping,
+                bed_level=kwargs.get("bed_levelling", True),
+                flow_calibrate=kwargs.get("flow_calibrate", False),
+                flow_calibrate_extruders=kwargs.get("flow_calibrate_extruders", []),
+                time_lapse_camera=kwargs.get("time_lapse_camera", False),
+            )
+            slots = self.state.raw_data.get("ams") if isinstance(self.state.raw_data, dict) else None
+            trays = slots[0].get("tray", []) if isinstance(slots, list) and slots and isinstance(slots[0], dict) else []
+            loaded = {tray.get("id") for tray in trays if isinstance(tray, dict) and tray.get("filament_detected")}
+            if any(pair[1] not in loaded for pair in mapping):
+                raise ValueError("A mapped U1 toolhead has no filament loaded")
+            try:
+                self._post("printer/gcode/script", {"script": script})
+            except httpx.ReadTimeout:
+                # A slow firmware response can follow an accepted start command.
+                # Check the printer before reporting failure and inviting a retry.
+                self.request_status_update()
+                current = self.state.current_print or self.state.gcode_file or ""
+                if self.state.state == "RUNNING" or current.endswith(normalized):
+                    return True
+                raise
+            return True
         if not self._prepare_creality_cfs_slot_for_print(kwargs.get("ams_mapping")):
             return False
         try:

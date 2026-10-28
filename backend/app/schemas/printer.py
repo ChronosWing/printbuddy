@@ -436,7 +436,7 @@ class PrinterStatus(BaseModel):
     # Print speed level (1=silent, 2=standard, 3=sport, 4=ludicrous)
     speed_level: int = 2
     # Chamber light on/off
-    chamber_light: bool = False
+    chamber_light: bool | None = None
     # Active extruder for dual nozzle (0=right, 1=left)
     active_extruder: int = 0
     # AMS mapping for dual nozzle: which AMS is connected to which nozzle
