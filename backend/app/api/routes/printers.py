@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import posixpath
 import re
 import tempfile
 import zipfile
@@ -1119,6 +1120,54 @@ async def get_printer_cover(
     subtask_name = state.subtask_name
     if not subtask_name:
         raise HTTPException(404, f"No subtask_name in printer state (state={state.state})")
+
+    if printer.provider in {"klipper", "mainsail", "fluidd"}:
+        from backend.app.models.archive import PrintArchive
+
+        archive_result = await db.execute(
+            select(PrintArchive)
+            .where(
+                PrintArchive.printer_id == printer_id,
+                PrintArchive.filename == subtask_name,
+                PrintArchive.status == "printing",
+            )
+            .order_by(PrintArchive.created_at.desc())
+            .limit(1)
+        )
+        archive = archive_result.scalar_one_or_none()
+        if archive and archive.thumbnail_path:
+            local_path = settings.base_dir / archive.thumbnail_path
+            if local_path.is_file():
+                extension = local_path.suffix.lower()
+                media_type = "image/jpeg" if extension in {".jpg", ".jpeg"} else f"image/{extension.lstrip('.')}"
+                return Response(content=local_path.read_bytes(), media_type=media_type)
+        client = printer_manager.get_client(printer_id)
+        metadata = getattr(state, "file_metadata", None) or {}
+        thumbnails = metadata.get("thumbnails") if isinstance(metadata, dict) else None
+        if client and isinstance(thumbnails, list):
+            for item in sorted(
+                (entry for entry in thumbnails if isinstance(entry, dict)),
+                key=lambda entry: (entry.get("width") or 0) * (entry.get("height") or 0),
+                reverse=True,
+            ):
+                relative = item.get("relative_path")
+                if (
+                    not isinstance(relative, str)
+                    or not relative
+                    or relative.startswith("/")
+                    or ".." in relative.split("/")
+                ):
+                    continue
+                path = posixpath.normpath(posixpath.join(posixpath.dirname(subtask_name), relative))
+                try:
+                    image = await asyncio.to_thread(client.download_file, path)
+                except (httpx.HTTPError, ValueError):
+                    continue
+                if image:
+                    extension = posixpath.splitext(relative)[1].lower()
+                    media_type = "image/jpeg" if extension in {".jpg", ".jpeg"} else "image/png"
+                    return Response(content=image, media_type=media_type)
+        raise HTTPException(404, "No Moonraker thumbnail available")
 
     # Resolve the active plate. Precedence (#1166):
     #   1. The plate Printbuddy dispatched (authoritative when we sent the print)

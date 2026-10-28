@@ -28,6 +28,7 @@ class MoonrakerPrinterState:
     raw_status: dict[str, Any] = field(default_factory=dict)
     raw_data: dict[str, Any] = field(default_factory=dict)
     gcode_file: str | None = None
+    file_metadata: dict[str, Any] = field(default_factory=dict)
     subtask_id: str | None = None
     hms_errors: list[Any] = field(default_factory=list)
     kprofiles: list[Any] = field(default_factory=list)
@@ -578,6 +579,7 @@ class MoonrakerPrinterClient:
         self._last_bed_temp: float | None = None
         self._current_print_started_at: float | None = None
         self._u1_spool_cache: dict[int, tuple[float, dict[str, Any] | None]] = {}
+        self._file_metadata_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -1349,7 +1351,7 @@ class MoonrakerPrinterClient:
 
     def _build_lifecycle_payload(self) -> dict[str, Any]:
         filename = self.state.subtask_name or self.state.current_print or self.state.gcode_file or "Unknown"
-        return {
+        payload = {
             "filename": filename,
             "subtask_name": filename,
             "progress": self.state.progress,
@@ -1357,6 +1359,35 @@ class MoonrakerPrinterClient:
             "status": self.state.state,
             "raw_data": self.state.raw_data,
         }
+        if filename != "Unknown":
+            metadata = self.get_file_metadata(filename)
+            if metadata:
+                payload["file_metadata"] = metadata
+                self.state.file_metadata = metadata
+                layer_count = _safe_int(metadata.get("layer_count"))
+                if layer_count is not None and layer_count > 0:
+                    self.state.total_layers = layer_count
+                estimated_time = _safe_int(metadata.get("estimated_time"))
+                if estimated_time is not None and estimated_time > 0 and not self.state.remaining_time:
+                    payload["remaining_time"] = estimated_time
+        return payload
+
+    def get_file_metadata(self, filename: str) -> dict[str, Any]:
+        """Fetch Moonraker's slicer metadata once per active G-code file."""
+        normalized = self._normalize_gcodes_path(filename)
+        if not normalized:
+            return {}
+        if normalized not in self._file_metadata_cache:
+            try:
+                metadata = self._get(f"server/files/metadata?filename={quote(normalized, safe='')}")
+            except (httpx.HTTPError, ValueError, TypeError):
+                return {}
+            if not metadata:
+                return {}
+            self._file_metadata_cache[normalized] = metadata
+            if len(self._file_metadata_cache) > 8:
+                self._file_metadata_cache.pop(next(iter(self._file_metadata_cache)))
+        return self._file_metadata_cache[normalized]
 
     def _emit_status_callbacks(self, previous_state: str | None) -> None:
         if self.on_state_change:
@@ -1377,6 +1408,8 @@ class MoonrakerPrinterClient:
         # owns that case; this edge detector is for new Moonraker transitions.
         if previous_state is not None and not previous_running and current_running:
             self._current_print_started_at = time.monotonic()
+            if self.state.gcode_file:
+                self._file_metadata_cache.pop(self._normalize_gcodes_path(self.state.gcode_file), None)
             if self.on_print_start:
                 self.on_print_start(self._build_lifecycle_payload())
         elif previous_running and not current_running:
@@ -1426,6 +1459,8 @@ class MoonrakerPrinterClient:
         self.state.state = _map_moonraker_state(raw_state)
         reported_file = print_stats.get("filename") or virtual_sdcard.get("file_path")
         if reported_file:
+            if self.state.gcode_file != str(reported_file):
+                self.state.file_metadata = {}
             self.state.gcode_file = str(reported_file)
             self.state.current_print = self.state.gcode_file
             self.state.subtask_name = self.state.gcode_file
@@ -1449,6 +1484,14 @@ class MoonrakerPrinterClient:
         else:
             self.state.progress = raw_progress
             self.state.remaining_time = _remaining_minutes(print_stats, self.state.progress)
+            if not self.state.remaining_time and self.state.gcode_file:
+                metadata = self._file_metadata_cache.get(self._normalize_gcodes_path(self.state.gcode_file), {})
+                if metadata:
+                    self.state.file_metadata = metadata
+                estimated = _safe_float(metadata.get("estimated_time"))
+                duration = _safe_float(print_stats.get("print_duration")) or 0.0
+                if estimated and estimated > duration:
+                    self.state.remaining_time = int((estimated - duration) // 60)
         self.state.temperatures = _moonraker_temperatures(status)
         self._apply_snapmaker_u1_status(status)
         _apply_moonraker_fans(self.state, status)

@@ -1132,6 +1132,11 @@ def printer_state_to_dict(state: PrinterState, printer_id: int | None = None, mo
         # "Clear Plate" button only appears when the 30 s REST fallback poll runs.
         "awaiting_plate_clear": printer_manager.is_awaiting_plate_clear(printer_id) if printer_id else False,
     }
+    file_metadata = getattr(state, "file_metadata", None)
+    if isinstance(file_metadata, dict) and file_metadata:
+        result["estimated_time"] = file_metadata.get("estimated_time")
+        result["filament_weight_total"] = file_metadata.get("filament_weight_total")
+        result["filament_weights"] = file_metadata.get("filament_weights")
     # Add cover URL if there's an active print and printer_id is provided
     # Include PAUSE state so skip objects modal can show cover
     if printer_id and state.state in ("RUNNING", "PAUSE") and state.gcode_file:

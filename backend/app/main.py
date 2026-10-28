@@ -949,6 +949,13 @@ def _file_metadata_for_archive(printer, data: dict) -> dict:
     """
     provider = getattr(printer, "provider", None)
     raw_data = data.get("raw_data") if isinstance(data.get("raw_data"), dict) else {}
+    metadata = data.get("file_metadata")
+    if (
+        provider in {"klipper", "mainsail", "fluidd"}
+        and isinstance(metadata, dict)
+        and metadata.get("source") == "moonraker"
+    ):
+        return metadata
     if provider in {"klipper", "mainsail", "fluidd"}:
         k2_metadata = _k2_cur_print_data_metadata(data)
         if k2_metadata:
@@ -982,6 +989,19 @@ def _refresh_file_metadata_for_archive(printer_id: int, printer, data: dict, log
     completed slicer metadata in ``virtual_sdcard.cur_print_data`` on the status
     payload, so it must be handled without the PrusaLink-only guard.
     """
+    if getattr(printer, "provider", None) in {"klipper", "mainsail", "fluidd"}:
+        filename = data.get("filename") or data.get("gcode_file")
+        client = printer_manager.get_client(printer_id)
+        getter = getattr(client, "get_file_metadata", None)
+        if filename and callable(getter):
+            try:
+                raw = getter(str(filename))
+                metadata = _normalize_moonraker_file_metadata(raw)
+                if metadata:
+                    data["file_metadata"] = metadata
+                    return metadata
+            except Exception as exc:
+                logger.debug("[FILE-META] Moonraker metadata unavailable for %s: %s", filename, exc)
     metadata = _file_metadata_for_archive(printer, data)
     if metadata:
         return metadata
@@ -1009,9 +1029,70 @@ def _refresh_file_metadata_for_archive(printer_id: int, printer, data: dict, log
     return {}
 
 
+def _normalize_moonraker_file_metadata(raw: dict | None) -> dict:
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    weights = raw.get("filament_weights")
+    weights = [max(0.0, _metadata_float(value) or 0.0) for value in weights] if isinstance(weights, list) else []
+    total = _metadata_float(raw.get("filament_weight_total"))
+    result = {"source": "moonraker"}
+    if total is not None or weights:
+        result["filament_used_grams"] = total if total is not None else sum(weights)
+    if weights:
+        result["filament_weights"] = weights
+        result["filament_slots"] = [
+            {"slot_id": index + 1, "used_g": round(weight, 2)} for index, weight in enumerate(weights) if weight > 0
+        ]
+    for source, target in (("estimated_time", "print_time_seconds"), ("layer_count", "total_layers")):
+        value = _metadata_float(raw.get(source))
+        if value is not None and value >= 0:
+            result[target] = int(value)
+    if isinstance(raw.get("thumbnails"), list):
+        result["thumbnails"] = raw["thumbnails"]
+    return result if len(result) > 1 else {}
+
+
+async def _save_moonraker_archive_thumbnail(printer_id: int, archive, filename: str, metadata: dict, logger) -> None:
+    """Copy a printer-hosted thumbnail into the existing archive directory."""
+    if archive.thumbnail_path or metadata.get("source") != "moonraker":
+        return
+    thumbnails = metadata.get("thumbnails")
+    if not isinstance(thumbnails, list):
+        return
+    candidates = sorted(
+        (item for item in thumbnails if isinstance(item, dict)),
+        key=lambda item: (_metadata_float(item.get("width")) or 0) * (_metadata_float(item.get("height")) or 0),
+        reverse=True,
+    )
+    client = printer_manager.get_client(printer_id)
+    download = getattr(client, "download_file", None)
+    if not callable(download):
+        return
+    for item in candidates:
+        relative = item.get("relative_path")
+        if not isinstance(relative, str) or not relative or relative.startswith("/") or ".." in relative.split("/"):
+            continue
+        remote_path = posixpath.normpath(posixpath.join(posixpath.dirname(filename), relative))
+        try:
+            content = await asyncio.to_thread(download, remote_path)
+            if not content:
+                continue
+            extension = posixpath.splitext(relative)[1].lower()
+            if extension not in {".png", ".jpg", ".jpeg", ".webp"}:
+                continue
+            archive_dir = app_settings.archive_dir / str(printer_id) / str(archive.id)
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            thumbnail = archive_dir / f"thumbnail{extension}"
+            thumbnail.write_bytes(content)
+            archive.thumbnail_path = str(thumbnail.relative_to(app_settings.base_dir))
+            return
+        except Exception as exc:
+            logger.debug("[FILE-META] Moonraker thumbnail unavailable for %s: %s", remote_path, exc)
+
+
 async def _apply_file_metadata_to_archive(db, printer_id: int, printer, archive, data: dict, logger) -> bool:
     """Populate a no-3MF fallback archive from provider metadata when needed."""
-    if not archive or archive.file_path or archive.filament_used_grams:
+    if not archive or archive.file_path:
         return False
     metadata = _refresh_file_metadata_for_archive(printer_id, printer, data, logger)
     if not metadata:
@@ -1021,7 +1102,11 @@ async def _apply_file_metadata_to_archive(db, printer_id: int, printer, archive,
     if grams is None or grams <= 0:
         return False
 
+    if archive.filament_used_grams:
+        return False
     archive.filament_used_grams = grams
+    if metadata.get("total_layers") and not archive.total_layers:
+        archive.total_layers = metadata["total_layers"]
     archive.filament_type = metadata.get("filament_type") or archive.filament_type
     metadata_cost = _metadata_float(metadata.get("filament_cost"))
     if metadata_cost is None:
@@ -1033,6 +1118,8 @@ async def _apply_file_metadata_to_archive(db, printer_id: int, printer, archive,
 
     extra_data = archive.extra_data if isinstance(archive.extra_data, dict) else {}
     extra_data["file_metadata"] = metadata
+    if metadata.get("filament_slots") and not extra_data.get("filament_slots"):
+        extra_data["filament_slots"] = metadata["filament_slots"]
     archive.extra_data = extra_data
     try:
         from sqlalchemy.orm.attributes import flag_modified
@@ -3218,7 +3305,8 @@ async def on_print_start(printer_id: int, data: dict):
         seen = set()
         possible_names = [x for x in possible_names if not (x in seen or seen.add(x))]
 
-        logger.info("Trying filenames: %s", possible_names)
+        if _should_attempt_bambu_ftp_archive(printer):
+            logger.info("Trying filenames: %s", possible_names)
 
         # Try to find and download the 3MF file
         temp_path = None
@@ -3246,7 +3334,8 @@ async def on_print_start(printer_id: int, data: dict):
                 break
 
         # Get FTP retry settings
-        ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
+        if attempt_bambu_ftp_archive:
+            ftp_retry_enabled, ftp_retry_count, ftp_retry_delay, ftp_timeout = await get_ftp_retry_settings()
 
         for try_filename in possible_names if attempt_bambu_ftp_archive and not downloaded_filename else []:
             if not try_filename.endswith(".3mf"):
@@ -3483,7 +3572,8 @@ async def on_print_start(printer_id: int, data: dict):
                         subtask_name = ""
 
         if not downloaded_filename or not temp_path:
-            logger.warning("Could not find 3MF file for print: %s", filename or subtask_name)
+            if attempt_bambu_ftp_archive:
+                logger.warning("Could not find 3MF file for print: %s", filename or subtask_name)
             # Create a fallback archive without 3MF data so the print is still tracked
             # This commonly happens with P1S/A1 printers where FTP has file size limitations
             try:
@@ -3519,6 +3609,8 @@ async def on_print_start(printer_id: int, data: dict):
                 extra_data = {"no_3mf_available": True, "original_subtask": subtask_name, "_print_data": data}
                 if file_metadata:
                     extra_data["file_metadata"] = file_metadata
+                    if file_metadata.get("filament_slots"):
+                        extra_data["filament_slots"] = file_metadata["filament_slots"]
 
                 # Create minimal archive entry
                 fallback_archive = PrintArchive(
@@ -3529,6 +3621,7 @@ async def on_print_start(printer_id: int, data: dict):
                     print_name=print_name,
                     print_time_seconds=metadata_print_time or fallback_print_time,
                     filament_used_grams=metadata_filament_grams,
+                    total_layers=file_metadata.get("total_layers"),
                     filament_type=file_metadata.get("filament_type"),
                     status="printing",
                     started_at=datetime.now(timezone.utc),
@@ -3540,6 +3633,11 @@ async def on_print_start(printer_id: int, data: dict):
                 db.add(fallback_archive)
                 await db.commit()
                 await db.refresh(fallback_archive)
+                if not attempt_bambu_ftp_archive:
+                    await _save_moonraker_archive_thumbnail(
+                        printer_id, fallback_archive, filename or subtask_name or "", file_metadata, logger
+                    )
+                    await db.commit()
 
                 logger.info("Created fallback archive %s for %s (no 3MF available)", fallback_archive.id, print_name)
 
@@ -3723,6 +3821,9 @@ async def _list_timelapse_videos(printer) -> tuple[list[dict], str | None]:
     Returns (video_files, found_path) where video_files is a list of file dicts
     and found_path is the directory where they were found, or ([], None).
     """
+    if not _should_attempt_bambu_ftp_archive(printer):
+        return [], None
+
     from backend.app.services.bambu_ftp import list_files_async
 
     logger = logging.getLogger(__name__)
@@ -3808,6 +3909,9 @@ async def _scan_for_timelapse_with_retries(archive_id: int, baseline_names: set[
                 return
             if not archive.printer_id:
                 logger.warning("[TIMELAPSE] Archive %s has no printer, aborting", archive_id)
+                return
+            printer_result = await db.execute(select(Printer).where(Printer.id == archive.printer_id))
+            if not _should_attempt_bambu_ftp_archive(printer_result.scalar_one_or_none()):
                 return
 
             if baseline_names is not None:
@@ -4206,6 +4310,16 @@ async def on_print_complete(printer_id: int, data: dict):
                 printer = printer_result.scalar_one_or_none()
                 if archive and printer:
                     updated = await _apply_file_metadata_to_archive(db, printer_id, printer, archive, data, logger)
+                    if not archive.thumbnail_path and getattr(printer, "provider", None) in {
+                        "klipper",
+                        "mainsail",
+                        "fluidd",
+                    }:
+                        metadata = _refresh_file_metadata_for_archive(printer_id, printer, data, logger)
+                        await _save_moonraker_archive_thumbnail(
+                            printer_id, archive, filename or subtask_name or "", metadata, logger
+                        )
+                        updated = updated or bool(archive.thumbnail_path)
                     if updated:
                         await db.commit()
         except Exception as e:
@@ -4223,7 +4337,7 @@ async def on_print_complete(printer_id: int, data: dict):
                 result = await db.execute(select(Printer).where(Printer.id == printer_id))
                 printer = result.scalar_one_or_none()
 
-            if printer:
+            if printer and _should_attempt_bambu_ftp_archive(printer):
                 from backend.app.services.bambu_ftp import delete_file_async
 
                 # Try both .3mf and .gcode extensions — the printer may have either
