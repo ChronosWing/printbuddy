@@ -271,7 +271,8 @@ async def _origin_points_at_repo(git_path: str, git_config: list[str], base_dir,
 def parse_version(version: str) -> tuple:
     """Parse version string into tuple for comparison.
 
-    Returns (major, minor, patch, micro, is_prerelease, prerelease_num)
+    Returns (major, minor, patch, micro, is_prerelease, prerelease_num,
+    fork_revision)
     where is_prerelease is 0 for release, 1 for prerelease.
     This ensures releases sort higher than prereleases of same version.
 
@@ -287,6 +288,12 @@ def parse_version(version: str) -> tuple:
     # Strip daily build suffix (e.g., "0.2.2b4-daily.20260313" -> "0.2.2b4")
     version = re.sub(r"-daily\.\d+$", "", version)
 
+    # Fork suffixes are stable releases. Keep their revision separate from
+    # upstream prerelease numbers so u1.2 sorts after u1.1 and the base.
+    fork_match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)\.(\d+)-u1\.(\d+)", version)
+    if fork_match:
+        return (*map(int, fork_match.group(1, 2, 3, 4)), 0, 0, int(fork_match.group(5)))
+
     # Match version pattern: major.minor.patch[.micro][b|beta|alpha|rc]N
     match = re.match(r"(\d+)\.(\d+)\.(\d+)(?:\.(\d+))?(?:b|beta|alpha|rc)?(\d+)?", version)
 
@@ -300,7 +307,7 @@ def parse_version(version: str) -> tuple:
         # Check if this is a prerelease (has b/beta/alpha/rc/daily suffix anywhere)
         is_prerelease = 1 if re.search(r"[a-zA-Z]", version) else 0
 
-        return (major, minor, patch, micro, is_prerelease, prerelease_num)
+        return (major, minor, patch, micro, is_prerelease, prerelease_num, 0)
 
     # Fallback: try simple split
     parts = []
@@ -311,7 +318,7 @@ def parse_version(version: str) -> tuple:
             num = "".join(c for c in part if c.isdigit())
             parts.append(int(num) if num else 0)
 
-    return tuple(parts) + (0, 0, 0)
+    return tuple(parts) + (0, 0, 0, 0)
 
 
 def _version_sort_key(version: str) -> tuple:
@@ -321,7 +328,8 @@ def _version_sort_key(version: str) -> tuple:
     is_prerelease = parsed[4] if len(parsed) > 4 else 0
     prerelease_num = parsed[5] if len(parsed) > 5 else 0
     stable_rank = 0 if is_prerelease else 1
-    return (*base, stable_rank, prerelease_num)
+    fork_revision = parsed[6] if len(parsed) > 6 else 0
+    return (*base, stable_rank, prerelease_num, fork_revision)
 
 
 def _select_latest_release(releases: list[dict], include_beta: bool) -> dict | None:
@@ -386,7 +394,12 @@ def is_newer_version(latest: str, current: str) -> bool:
         latest_prerelease_num = latest_parsed[5] if len(latest_parsed) > 5 else 0
         current_prerelease_num = current_parsed[5] if len(current_parsed) > 5 else 0
 
-        return latest_prerelease_num > current_prerelease_num
+        if latest_prerelease_num != current_prerelease_num:
+            return latest_prerelease_num > current_prerelease_num
+
+        latest_fork_revision = latest_parsed[6] if len(latest_parsed) > 6 else 0
+        current_fork_revision = current_parsed[6] if len(current_parsed) > 6 else 0
+        return latest_fork_revision > current_fork_revision
 
     except Exception:
         return False

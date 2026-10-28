@@ -389,11 +389,16 @@ class TestUpdatesAPI:
         from backend.app.api.routes.updates import parse_version
 
         assert parse_version("0.1.5")[:3] == (0, 1, 5)
+        assert parse_version("v0.2.5.3-u1.1") == (0, 2, 5, 3, 0, 0, 1)
 
     def test_is_newer_version(self):
         from backend.app.api.routes.updates import is_newer_version
 
         assert is_newer_version("0.1.5", "0.1.5b7") is True
+        assert is_newer_version("0.2.5.3-u1.1", "0.2.5.3") is True
+        assert is_newer_version("0.2.5.3-u1.2", "0.2.5.3-u1.1") is True
+        assert is_newer_version("0.2.5.3", "0.2.5.3-u1.1") is False
+        assert is_newer_version("0.2.5.4", "0.2.5.3-u1.1") is True
 
     def test_select_latest_release_sorts_by_version_not_github_order(self):
         """GitHub can return older prereleases before newer ones; the updater
@@ -411,6 +416,16 @@ class TestUpdatesAPI:
 
         assert selected is not None
         assert selected["tag_name"] == "v0.2.5.1b11"
+
+    def test_fork_release_is_stable_and_sorts_by_revision(self):
+        from backend.app.api.routes.updates import _select_latest_release
+
+        releases = [
+            {"tag_name": "v0.2.5.3-u1.1"},
+            {"tag_name": "v0.2.5.3"},
+            {"tag_name": "v0.2.5.3-u1.2"},
+        ]
+        assert _select_latest_release(releases, include_beta=False)["tag_name"] == "v0.2.5.3-u1.2"
 
     @pytest.mark.asyncio
     async def test_check_for_updates_sorts_releases_by_version(self, async_client: AsyncClient, db_session):

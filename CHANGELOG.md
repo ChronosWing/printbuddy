@@ -5,7 +5,7 @@ The historical upstream changelog is preserved after that section for fork/upstr
 
 ## ChronosWing fork
 
-### 0.2.5.4 — Snapmaker U1 enhanced release
+### 0.2.5.3-u1.1 — Snapmaker U1 enhanced release
 
 - Added Snapmaker U1 print initiation from uploaded or already-stored G-code, with automatic and manual four-toolhead filament mapping, print-option review, and confirmation before starting.
 - Added U1 chamber light control, Moonraker file management, OrcaSlicer print metadata and thumbnails, and persistent archive thumbnails.

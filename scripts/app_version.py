@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_PATH = ROOT / "backend" / "app" / "core" / "config.py"
 APP_VERSION_RE = re.compile(r'^(APP_VERSION\s*=\s*")([^"]+)(")$', re.MULTILINE)
-VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?(?:[A-Za-z]+\d+)?$")
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:\.\d+)?(?:[A-Za-z]+\d+|-u1\.\d+)?$")
 
 
 def read_version(path: Path = CONFIG_PATH) -> str:
@@ -27,7 +27,7 @@ def validate_version(version: str) -> None:
         version = version[1:]
     if not VERSION_RE.fullmatch(version):
         raise SystemExit(
-            f"Invalid version. Expected forms like 0.2.4, 0.2.4.8, or 0.2.5b1 without a leading v; got {version!r}"
+            f"Invalid version. Expected forms like 0.2.4, 0.2.4.8, 0.2.5b1, or 0.2.5.3-u1.1; got {version!r}"
         )
 
 
