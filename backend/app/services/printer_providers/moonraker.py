@@ -1514,8 +1514,18 @@ class MoonrakerPrinterClient:
 
     def delete_file(self, remote_path: str, *, storage: str | None = None) -> bool:
         root = str(storage or "gcodes").strip().strip("/") or "gcodes"
+        if root != "gcodes":
+            raise ValueError("Moonraker File Manager can only delete from the gcodes root")
         normalized = self._normalize_gcodes_path(remote_path)
-        self._post("server/files/delete_file", {"path": f"{root}/{normalized}"})
+        if not normalized or any(part in {"", ".", ".."} for part in normalized.split("/")) or "\\" in normalized:
+            raise ValueError("Invalid Moonraker file path")
+        encoded_path = "/".join(quote(part, safe="") for part in normalized.split("/"))
+        response = httpx.delete(
+            urljoin(self.base_url, f"server/files/gcodes/{encoded_path}"),
+            headers=self._headers,
+            timeout=self.timeout,
+        )
+        response.raise_for_status()
         return True
 
     def configure_u1_filament(self, ams_id: int, tray_id: int, material: str, subtype: str, color: str) -> None:

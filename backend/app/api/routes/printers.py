@@ -2147,7 +2147,20 @@ async def delete_printer_file(
 
     provider_client = _provider_for_printer(printer)
     if provider_client is not None:
-        success = provider_client.delete_file(path, storage=storage)
+        try:
+            success = provider_client.delete_file(path, storage=storage)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            raise HTTPException(
+                status_code if status_code in {400, 401, 403, 404, 409} else 502,
+                f"Printer file delete failed: HTTP {status_code}",
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise HTTPException(504, "Printer file delete timed out") from exc
+        except httpx.RequestError as exc:
+            raise HTTPException(503, "Printer is unavailable") from exc
     else:
         success = await delete_file_async(printer.ip_address, printer.access_code, path, printer_model=printer.model)
     if not success:
