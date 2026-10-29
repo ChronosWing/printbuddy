@@ -677,6 +677,18 @@ async def run_migrations(conn):
 
     # Migration: Add location column to printers for grouping
     await _safe_execute(conn, "ALTER TABLE printers ADD COLUMN location VARCHAR(100)")
+    await _safe_execute(
+        conn, "ALTER TABLE printers ADD COLUMN spoolman_location_sync_enabled BOOLEAN DEFAULT 0 NOT NULL"
+    )
+    await _safe_execute(conn, "ALTER TABLE printers ADD COLUMN spoolman_location VARCHAR(64)")
+    await _safe_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS spoolman_location_ownership (spool_id INTEGER PRIMARY KEY, location VARCHAR(64) NOT NULL, printer_id INTEGER NOT NULL)",
+    )
+    await _safe_execute(
+        conn,
+        "CREATE TABLE IF NOT EXISTS spoolman_native_slots (printer_id INTEGER NOT NULL REFERENCES printers(id) ON DELETE CASCADE, ams_id INTEGER NOT NULL, tray_id INTEGER NOT NULL, spool_id INTEGER NOT NULL, PRIMARY KEY (printer_id, ams_id, tray_id))",
+    )
 
     # Migration: Add provider metadata for Printbuddy multi-printer backends
     await _safe_execute(conn, "ALTER TABLE printers ADD COLUMN provider VARCHAR(20) DEFAULT 'bambu'")

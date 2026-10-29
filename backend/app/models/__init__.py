@@ -30,6 +30,7 @@ from backend.app.models.spool_assignment import SpoolAssignment
 from backend.app.models.spool_catalog import SpoolCatalogEntry
 from backend.app.models.spool_k_profile import SpoolKProfile
 from backend.app.models.spool_usage_history import SpoolUsageHistory
+from backend.app.models.spoolman_location import SpoolmanLocationOwnership, SpoolmanNativeSlot
 from backend.app.models.user import User
 from backend.app.models.user_email_pref import UserEmailPreference
 from backend.app.models.user_otp_code import UserOTPCode
@@ -72,6 +73,8 @@ __all__ = [
     "OrcaBaseProfile",
     "Spool",
     "SpoolKProfile",
+    "SpoolmanLocationOwnership",
+    "SpoolmanNativeSlot",
     "SpoolAssignment",
     "SpoolCatalogEntry",
     "SpoolUsageHistory",

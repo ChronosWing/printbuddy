@@ -1813,6 +1813,21 @@ async def on_ams_change(printer_id: int, ams_data: list):
 
     _print_active = printer_id in _active_sessions
 
+    # Native Moonraker spool IDs are firmware-owned and never enter the Bambu
+    # AMS assignment table. Mirror only complete, connected snapshots.
+    try:
+        from backend.app.models.printer import Printer
+        from backend.app.services.spoolman_location_sync import sync_native_spool_slots
+
+        async with async_session() as db:
+            printer = await db.get(Printer, printer_id)
+            if printer and printer.spoolman_location_sync_enabled:
+                client = await get_spoolman_client()
+                if client:
+                    await sync_native_spool_slots(db, client, printer_id, ams_data)
+    except Exception:
+        logger.exception("Could not synchronize native Spoolman slots for printer %s", printer_id)
+
     # MQTT relay - publish AMS change
     try:
         printer_info = printer_manager.get_printer(printer_id)
@@ -2496,6 +2511,15 @@ async def on_ams_change(printer_id: int, ams_data: list):
             # Persist slot assignment changes to the local table
             if slot_changes or empty_slots:
                 try:
+                    from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+                    affected_spool_ids = {spool_id for _, _, spool_id in slot_changes}
+                    previous_rows = await db.execute(
+                        select(SpoolmanSlotAssignment.spoolman_spool_id).where(
+                            SpoolmanSlotAssignment.printer_id == printer_id
+                        )
+                    )
+                    affected_spool_ids.update(previous_rows.scalars().all())
                     for ams_id, tray_id, spool_id in slot_changes:
                         await db.execute(
                             text(
@@ -2521,6 +2545,7 @@ async def on_ams_change(printer_id: int, ams_data: list):
                             )
                         )
                     await db.commit()
+                    await reconcile_spool_locations(db, client, affected_spool_ids)
                 except Exception as e:
                     await db.rollback()
                     logger.error("Error persisting Spoolman slot assignments for printer %s: %s", printer_id, e)

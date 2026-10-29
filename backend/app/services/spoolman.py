@@ -548,6 +548,25 @@ class SpoolmanClient:
             params["allow_archived"] = "true"
         return await self._get_with_retry("/spool", params=params or None)
 
+    async def get_locations(self) -> list[str]:
+        """Existing Spoolman location groups, including archived spools."""
+        groups = await self._get_with_retry("/spool/group", params={"group_by": "location", "allow_archived": "true"})
+        return sorted(
+            {
+                key
+                for group in groups
+                if isinstance(group, dict)
+                if (key := group.get("key")) and isinstance(key, str) and key.strip()
+            }
+        )
+
+    async def set_spool_location(self, spool_id: int, location: str | None) -> dict:
+        """Patch only location; unlike update_spool, leave last_used untouched."""
+        response = await self._request_spool(
+            "PATCH", spool_id, json_body={"location": location}, operation="update-location"
+        )
+        return response.json()
+
     async def delete_spool(self, spool_id: int) -> None:
         """Delete a spool from Spoolman."""
         await self._request_spool("DELETE", spool_id, operation="delete")

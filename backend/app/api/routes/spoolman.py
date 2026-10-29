@@ -360,6 +360,13 @@ async def sync_printer_ams(
     # Persist slot assignment changes to the local table
     if slot_changes or empty_slots:
         try:
+            from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+            affected_spool_ids = {spool_id for _, _, spool_id in slot_changes}
+            previous_rows = await db.execute(
+                select(SpoolmanSlotAssignment.spoolman_spool_id).where(SpoolmanSlotAssignment.printer_id == printer_id)
+            )
+            affected_spool_ids.update(previous_rows.scalars().all())
             for ams_id, tray_id, spool_id in slot_changes:
                 await db.execute(
                     text(
@@ -380,6 +387,7 @@ async def sync_printer_ams(
                     )
                 )
             await db.commit()
+            await reconcile_spool_locations(db, client, affected_spool_ids)
         except Exception as e:
             await db.rollback()
             logger.error("Error persisting Spoolman slot assignments for printer %s: %s", printer_id, e)
@@ -560,6 +568,18 @@ async def sync_all_printers(
     # Persist slot assignment changes across all printers
     if all_slot_changes or all_empty_slots:
         try:
+            from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+            affected_spool_ids = {spool_id for _, _, _, spool_id in all_slot_changes}
+            changed_printer_ids = {p_id for p_id, _, _, _ in all_slot_changes} | {
+                p_id for p_id, _, _ in all_empty_slots
+            }
+            previous_rows = await db.execute(
+                select(SpoolmanSlotAssignment.spoolman_spool_id).where(
+                    SpoolmanSlotAssignment.printer_id.in_(changed_printer_ids)
+                )
+            )
+            affected_spool_ids.update(previous_rows.scalars().all())
             for p_id, ams_id, tray_id, spool_id in all_slot_changes:
                 await db.execute(
                     text(
@@ -580,6 +600,7 @@ async def sync_all_printers(
                     )
                 )
             await db.commit()
+            await reconcile_spool_locations(db, client, affected_spool_ids)
         except Exception as e:
             await db.rollback()
             logger.error("Error persisting Spoolman slot assignments: %s", e)
@@ -824,6 +845,15 @@ async def link_spool(
     if printer_context:
         p_id, a_id, t_id = printer_context
         try:
+            previous = (
+                await db.execute(
+                    select(SpoolmanSlotAssignment.spoolman_spool_id).where(
+                        SpoolmanSlotAssignment.printer_id == p_id,
+                        SpoolmanSlotAssignment.ams_id == a_id,
+                        SpoolmanSlotAssignment.tray_id == t_id,
+                    )
+                )
+            ).scalar_one_or_none()
             await db.execute(
                 text(
                     "INSERT INTO spoolman_slot_assignments"
@@ -835,6 +865,9 @@ async def link_spool(
                 {"printer_id": p_id, "ams_id": a_id, "tray_id": t_id, "spool_id": spool_id},
             )
             await db.commit()
+            from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+            await reconcile_spool_locations(db, client, {spool_id, previous or 0})
         except Exception as e:
             await db.rollback()
             logger.error(
@@ -1107,6 +1140,9 @@ async def unlink_spool(
     try:
         await db.execute(delete(SpoolmanSlotAssignment).where(SpoolmanSlotAssignment.spoolman_spool_id == spool_id))
         await db.commit()
+        from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+        await reconcile_spool_locations(db, client, {spool_id})
     except Exception:
         await db.rollback()
         logger.exception("DB error removing slot assignment for spool %s", spool_id)

@@ -163,6 +163,8 @@ class PrinterBase(BaseModel):
     provider_options: str | None = Field(default=None, max_length=4000)
     model: str | None = None
     location: str | None = None  # Group/location name
+    spoolman_location_sync_enabled: bool = False
+    spoolman_location: str | None = Field(default=None, max_length=64)
     auto_archive: bool = True
     reconnect_interval_seconds: int = Field(default=30, ge=10, le=3600)
     external_camera_url: str | None = None
@@ -199,6 +201,8 @@ class PrinterUpdate(BaseModel):
     provider_options: str | None = Field(default=None, max_length=4000)
     model: str | None = None
     location: str | None = None
+    spoolman_location_sync_enabled: bool | None = None
+    spoolman_location: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None
     auto_archive: bool | None = None
     reconnect_interval_seconds: int | None = Field(default=None, ge=10, le=3600)
@@ -246,6 +250,8 @@ class PrinterResponse(PrinterBase):
             "provider_options": getattr(printer, "provider_options", None),
             "model": printer.model,
             "location": printer.location,
+            "spoolman_location_sync_enabled": printer.spoolman_location_sync_enabled,
+            "spoolman_location": printer.spoolman_location,
             "auto_archive": printer.auto_archive,
             "reconnect_interval_seconds": getattr(printer, "reconnect_interval_seconds", 30),
             "external_camera_url": effective_camera.url,

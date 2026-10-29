@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import Response
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import RequireCameraStreamTokenIfAuthEnabled, RequirePermissionIfAuthEnabled
@@ -552,6 +552,24 @@ async def update_printer(
     await db.commit()
     await db.refresh(printer)
 
+    if {"spoolman_location_sync_enabled", "spoolman_location"} & update_data.keys():
+        from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
+        from backend.app.services.spoolman import get_spoolman_client
+        from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+        client = await get_spoolman_client()
+        if client:
+            rows = await db.execute(
+                select(SpoolmanSlotAssignment.spoolman_spool_id).where(SpoolmanSlotAssignment.printer_id == printer_id)
+            )
+            spool_ids = set(rows.scalars().all())
+            native_rows = await db.execute(
+                text("SELECT spool_id FROM spoolman_native_slots WHERE printer_id = :printer_id"),
+                {"printer_id": printer_id},
+            )
+            spool_ids.update(native_rows.scalars().all())
+            await reconcile_spool_locations(db, client, spool_ids)
+
     # Reconnect if connection settings changed
     if any(k in update_data for k in ["ip_address", "access_code", "auth_token", "provider_options", "is_active"]):
         printer_manager.disconnect_printer(printer_id)
@@ -606,7 +624,25 @@ async def delete_printer(
         await db.execute(update(PrintArchive).where(PrintArchive.printer_id == printer_id).values(printer_id=None))
 
     # Delete slot assignments for this printer (SQLite doesn't enforce FK cascades)
+    spool_ids = set(
+        (
+            await db.execute(
+                select(SpoolmanSlotAssignment.spoolman_spool_id).where(SpoolmanSlotAssignment.printer_id == printer_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
     await db.execute(sql_delete(SpoolmanSlotAssignment).where(SpoolmanSlotAssignment.printer_id == printer_id))
+    native_rows = await db.execute(
+        text("SELECT spool_id FROM spoolman_native_slots WHERE printer_id = :printer_id"),
+        {"printer_id": printer_id},
+    )
+    spool_ids.update(native_rows.scalars().all())
+    await db.execute(
+        text("DELETE FROM spoolman_native_slots WHERE printer_id = :printer_id"),
+        {"printer_id": printer_id},
+    )
 
     # Delete maintenance history and items for this printer
     # (SQLite doesn't enforce FK cascades, so do it explicitly)
@@ -623,6 +659,14 @@ async def delete_printer(
 
     await db.delete(printer)
     await db.commit()
+
+    if spool_ids:
+        from backend.app.services.spoolman import get_spoolman_client
+        from backend.app.services.spoolman_location_sync import reconcile_spool_locations
+
+        client = await get_spoolman_client()
+        if client:
+            await reconcile_spool_locations(db, client, spool_ids)
 
     return {"status": "deleted", "archives_deleted": delete_archives}
 

@@ -6671,6 +6671,42 @@ function PrinterCard({
   );
 }
 
+function SpoolmanLocationSettings({
+  enabled, location, onEnabledChange, onLocationChange,
+}: {
+  enabled: boolean;
+  location: string;
+  onEnabledChange: (enabled: boolean) => void;
+  onLocationChange: (location: string) => void;
+}) {
+  const { data: locations = [], isError } = useQuery({
+    queryKey: ['spoolman-locations'],
+    queryFn: api.getSpoolmanLocations,
+    retry: false,
+  });
+  const savedMissing = Boolean(location) && !locations.includes(location);
+  return (
+    <div className="space-y-2 border-t border-bambu-dark-tertiary pt-3">
+      <label className="flex items-center gap-2 text-sm text-bambu-gray">
+        <input type="checkbox" checked={enabled} onChange={(e) => onEnabledChange(e.target.checked)} />
+        Enable Spoolman Location Sync
+      </label>
+      <label className="block text-sm text-bambu-gray" htmlFor="spoolman_location">Spoolman Location</label>
+      <select
+        id="spoolman_location"
+        value={location}
+        onChange={(e) => onLocationChange(e.target.value)}
+        className="w-full px-3 py-2 bg-bambu-dark border border-bambu-dark-tertiary rounded-lg text-white"
+      >
+        <option value="">Select an existing location</option>
+        {savedMissing && <option value={location}>{location} (previously configured)</option>}
+        {locations.map((name) => <option key={name} value={name}>{name}</option>)}
+      </select>
+      {isError && <p className="text-xs text-bambu-gray">Spoolman is unavailable. Your saved selection is preserved.</p>}
+    </div>
+  );
+}
+
 function AddPrinterModal({
   onClose,
   onAdd,
@@ -6691,6 +6727,8 @@ function AddPrinterModal({
     auth_token: '',
     model: '',
     location: '',
+    spoolman_location_sync_enabled: false,
+    spoolman_location: null,
     auto_archive: true,
     reconnect_interval_seconds: 30,
     external_camera_url: '',
@@ -7431,6 +7469,12 @@ function AddPrinterModal({
               />
               <p className="text-xs text-bambu-gray mt-1">{t('printers.locationHelp')}</p>
             </div>
+            <SpoolmanLocationSettings
+              enabled={Boolean(form.spoolman_location_sync_enabled)}
+              location={form.spoolman_location || ''}
+              onEnabledChange={(enabled) => setForm({ ...form, spoolman_location_sync_enabled: enabled })}
+              onLocationChange={(location) => setForm({ ...form, spoolman_location: location || null })}
+            />
             <div className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -7819,6 +7863,8 @@ function EditPrinterModal({
     access_code: '',
     model: printer.model || '',
     location: printer.location || '',
+    spoolman_location_sync_enabled: printer.spoolman_location_sync_enabled,
+    spoolman_location: printer.spoolman_location || '',
     auto_archive: printer.auto_archive,
     reconnect_interval_seconds: printer.reconnect_interval_seconds ?? 30,
     prusa_link_api_auth_mode: parsePrusaLinkApiAuthMode(printer.provider_options),
@@ -7854,6 +7900,8 @@ function EditPrinterModal({
       ip_address: form.ip_address,
       model: form.model || undefined,
       location: form.location || undefined,
+      spoolman_location_sync_enabled: form.spoolman_location_sync_enabled,
+      spoolman_location: form.spoolman_location || null,
       auto_archive: form.auto_archive,
       reconnect_interval_seconds: form.reconnect_interval_seconds,
     };
@@ -7999,6 +8047,12 @@ function EditPrinterModal({
               />
               <p className="text-xs text-bambu-gray mt-1">{t('printers.locationHelp')}</p>
             </div>
+            <SpoolmanLocationSettings
+              enabled={form.spoolman_location_sync_enabled}
+              location={form.spoolman_location}
+              onEnabledChange={(enabled) => setForm({ ...form, spoolman_location_sync_enabled: enabled })}
+              onLocationChange={(location) => setForm({ ...form, spoolman_location: location })}
+            />
             <div className="flex items-center gap-2">
               <input
                 type="checkbox"

@@ -286,6 +286,8 @@ export interface Printer {
   provider_options: string | null;
   model: string | null;
   location: string | null;  // Group/location name
+  spoolman_location_sync_enabled: boolean;
+  spoolman_location: string | null;
   nozzle_count: number;  // 1 or 2, auto-detected from MQTT
   is_active: boolean;
   auto_archive: boolean;
@@ -516,6 +518,8 @@ export interface PrinterCreate {
   provider_options?: string | null;
   model?: string;
   location?: string;
+  spoolman_location_sync_enabled?: boolean;
+  spoolman_location?: string | null;
   auto_archive?: boolean;
   reconnect_interval_seconds?: number;
   external_camera_url?: string | null;
@@ -5466,6 +5470,7 @@ export const api = {
     request<SlicerSetting[]>('/cloud/filaments'),
 
   // Spoolman Inventory proxy (unified UI when Spoolman is enabled)
+  getSpoolmanLocations: () => request<string[]>('/spoolman/inventory/locations'),
   getSpoolmanInventorySpools: (includeArchived = false) =>
     request<InventorySpool[]>(`/spoolman/inventory/spools?include_archived=${includeArchived}`),
   getSpoolmanInventorySpool: (id: number) =>

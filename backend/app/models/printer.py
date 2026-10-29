@@ -20,6 +20,8 @@ class Printer(Base):
     provider_options: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(50))
     location: Mapped[str | None] = mapped_column(String(100))  # Group/location name
+    spoolman_location_sync_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
+    spoolman_location: Mapped[str | None] = mapped_column(String(64), nullable=True)
     nozzle_count: Mapped[int] = mapped_column(default=1)  # 1 or 2, auto-detected from MQTT
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     auto_archive: Mapped[bool] = mapped_column(Boolean, default=True)

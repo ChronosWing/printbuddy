@@ -7,7 +7,7 @@ Tests for:
   GET    /api/v1/spoolman/inventory/slot-assignments/all[?printer_id=]
 
 Slot assignments are now stored in the local ``spoolman_slot_assignments`` table.
-Spoolman's ``spool.location`` field is NOT touched by any of these endpoints.
+Spoolman's ``spool.location`` field is untouched unless per-printer sync is enabled.
 """
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -85,6 +85,54 @@ def mock_client():
 
 
 class TestAssignSpoolmanSlot:
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_disabled_sync_keeps_existing_cross_printer_assignment_behavior(
+        self, async_client: AsyncClient, slot_settings, test_printer, mock_client, db_session
+    ):
+        from backend.app.models.printer import Printer
+
+        second = Printer(name="Second", serial_number="SLOTTEST002", ip_address="localhost", access_code="test")
+        db_session.add(second)
+        await db_session.commit()
+        payload = {"spoolman_spool_id": 10, "ams_id": 0, "tray_id": 0}
+        for printer_id in (test_printer.id, second.id):
+            response = await async_client.post(
+                "/api/v1/spoolman/inventory/slot-assignments", json={**payload, "printer_id": printer_id}
+            )
+            assert response.status_code == 200
+        rows = (await async_client.get("/api/v1/spoolman/inventory/slot-assignments/all")).json()
+        assert len([row for row in rows if row["spoolman_spool_id"] == 10]) == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_enabled_sync_rejects_ambiguous_cross_printer_move(
+        self, async_client: AsyncClient, slot_settings, test_printer, mock_client, db_session
+    ):
+        from backend.app.models.printer import Printer
+
+        second = Printer(
+            name="Second",
+            serial_number="SLOTTEST002",
+            ip_address="localhost",
+            access_code="test",
+            spoolman_location_sync_enabled=True,
+            spoolman_location="Second",
+        )
+        db_session.add(second)
+        await db_session.commit()
+        payload = {"spoolman_spool_id": 10, "ams_id": 0, "tray_id": 0}
+        first = await async_client.post(
+            "/api/v1/spoolman/inventory/slot-assignments", json={**payload, "printer_id": test_printer.id}
+        )
+        assert first.status_code == 200
+        response = await async_client.post(
+            "/api/v1/spoolman/inventory/slot-assignments", json={**payload, "printer_id": second.id}
+        )
+        assert response.status_code == 409
+        rows = (await async_client.get("/api/v1/spoolman/inventory/slot-assignments/all")).json()
+        assert len([row for row in rows if row["spoolman_spool_id"] == 10]) == 1
+
     @pytest.mark.asyncio
     @pytest.mark.integration
     async def test_assign_inserts_local_row(self, async_client: AsyncClient, slot_settings, test_printer, mock_client):

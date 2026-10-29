@@ -51,6 +51,7 @@ from backend.app.services.spoolman import (
     get_spoolman_client,
     init_spoolman_client,
 )
+from backend.app.services.spoolman_location_sync import reconcile_spool_locations
 from backend.app.services.spoolman_tracking import get_fallback_spool_tag_for_slot
 from backend.app.utils.filament_ids import (
     MATERIAL_TEMPS,
@@ -457,6 +458,17 @@ class SpoolSlotAssignmentRequest(BaseModel):
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/locations", response_model=list[str])
+async def list_spoolman_locations(
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+) -> list[str]:
+    """Names already used as Spoolman spool locations."""
+    client = await _get_client(db)
+    async with _translate_spoolman_errors():
+        return await client.get_locations()
 
 
 @router.get("/spools")
@@ -1261,7 +1273,7 @@ async def assign_spoolman_slot(
     """Assign a Spoolman spool to a printer AMS slot (stored in local DB only).
 
     Raises 404 if the printer does not exist or the spool is not found in Spoolman.
-    Spoolman's own ``spool.location`` field is NOT touched — it is user-managed.
+    Location synchronization is best-effort for printers that opted in.
     """
 
     client = await _get_client(db)
@@ -1274,6 +1286,30 @@ async def assign_spoolman_slot(
     # This prevents ghost rows pointing at non-existent spool IDs.
     async with _translate_spoolman_errors():
         spool = await client.get_spool(body.spoolman_spool_id)
+
+    previous = (
+        await db.execute(
+            select(SpoolmanSlotAssignment).where(
+                SpoolmanSlotAssignment.printer_id == body.printer_id,
+                SpoolmanSlotAssignment.ams_id == body.ams_id,
+                SpoolmanSlotAssignment.tray_id == body.tray_id,
+            )
+        )
+    ).scalar_one_or_none()
+    previous_spool_id = previous.spoolman_spool_id if previous else None
+    if printer.spoolman_location_sync_enabled:
+        other_binding = (
+            await db.execute(
+                select(SpoolmanSlotAssignment.id).where(
+                    SpoolmanSlotAssignment.spoolman_spool_id == body.spoolman_spool_id,
+                    SpoolmanSlotAssignment.printer_id != body.printer_id,
+                )
+            )
+        ).first()
+        if other_binding:
+            raise HTTPException(
+                status_code=409, detail="Unassign this spool from its previous printer before moving it"
+            )
 
     # Spool confirmed in Spoolman — upsert into local slot-assignment table
     # assigned_at is intentionally not refreshed on re-assign (original timestamp preserved)
@@ -1298,6 +1334,8 @@ async def assign_spoolman_slot(
         await db.rollback()
         logger.error("Failed to persist slot assignment: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to save slot assignment") from exc
+
+    await reconcile_spool_locations(db, client, {body.spoolman_spool_id, previous_spool_id or 0})
 
     # #1457: clear stale fallback-tag links on OTHER spools still bound to this
     # slot. Without this, a non-RFID slot's deterministic fallback tag stays
@@ -1518,7 +1556,7 @@ async def unassign_spoolman_slot(
 ) -> dict:
     """Remove the local slot assignment for a Spoolman spool.
 
-    Spoolman's own ``spool.location`` field is NOT touched — it is user-managed.
+    Location synchronization is best-effort for printers that opted in.
     """
     client = await _get_client(db)
 
@@ -1531,6 +1569,8 @@ async def unassign_spoolman_slot(
         await db.rollback()
         logger.error("Failed to delete slot assignment: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to remove slot assignment") from exc
+
+    await reconcile_spool_locations(db, client, {spoolman_spool_id})
 
     # Fetch the spool from Spoolman to return in InventorySpool format.
     # If the spool no longer exists in Spoolman, the local unassignment still succeeded.
