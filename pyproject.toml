@@ -1,7 +1,7 @@
 [project]
 name = "printbuddy"
-# PEP 440 local version corresponding to the public release tag v0.2.5.3-u1.1.
-version = "0.2.5.3+u1.1"
+# PEP 440 local version corresponding to the public release tag v0.2.5.3-u1.2.
+version = "0.2.5.3+u1.2"
 description = "Printbuddy printer management for Bambu Lab, Klipper, and Mainsail workflows"
 requires-python = ">=3.10"
 

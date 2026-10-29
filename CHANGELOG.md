@@ -5,6 +5,13 @@ The historical upstream changelog is preserved after that section for fork/upstr
 
 ## ChronosWing fork
 
+### 0.2.5.3-u1.2 — Spoolman location sync and U1 chamber light state
+
+- Added optional per-printer Spoolman location synchronization for Bambu AMS and Snapmaker U1 toolhead assignments. Select an existing Spoolman location in each printer’s settings; synchronization stays off by default for existing printers.
+- Location updates follow spool assignment, replacement, movement, and removal without changing filament consumption. Saved locations remain usable when their Spoolman group is temporarily empty.
+- Fixed Snapmaker U1 chamber light status on startup, page refresh, reconnection, and external light changes by reading the Moonraker state instead of assuming the light is off. Existing light commands remain unchanged.
+- U1 support was tested with paxx12 Extended Firmware; Bambu printer support remains available.
+
 ### 0.2.5.3-u1.1 — Snapmaker U1 enhanced release
 
 - Added Snapmaker U1 print initiation from uploaded or already-stored G-code, with automatic and manual four-toolhead filament mapping, print-option review, and confirmation before starting.

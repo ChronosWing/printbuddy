@@ -6,7 +6,7 @@ from pathlib import Path
 from pydantic_settings import BaseSettings
 
 # Application version - single source of truth
-APP_VERSION = "0.2.5.3-u1.1"
+APP_VERSION = "0.2.5.3-u1.2"
 GITHUB_REPO = "ChronosWing/printbuddy"
 
 # App directory - where the application is installed (for static files)

@@ -11,6 +11,10 @@ This community fork builds on the original [PrintBuddy by vmhomelab](https://git
 - U1 G-code browsing and deletion through Moonraker, plus filament editing. OrcaSlicer G-code metadata provides estimated print time, layer count, and per-toolhead filament usage; Moonraker thumbnails remain in PrintBuddy archives after printer files are removed.
 - Native Spoolman inventory through the U1 firmware, including remaining filament weights and native consumption tracking without duplicate PrintBuddy deductions.
 
+### Spoolman location synchronization
+
+In each printer’s settings, enable **Spoolman Location Sync** and choose a **Spoolman Location** from existing Spoolman locations. This is optional and disabled by default for existing printers. PrintBuddy updates a spool’s location as it is assigned, moved, replaced, or unassigned from supported printer slots. A saved location remains selectable even when it temporarily has no spools. The U1 chamber-light toggle also reads the printer’s actual state when PrintBuddy starts or reconnects.
+
 **Current U1 limitations:** These enhancements have been developed and tested with paxx12 Extended Firmware; compatibility with unmodified stock firmware is not established. Top Cover and internal/external circulation controls are not implemented. Features available on the U1 should not be assumed to work on every Moonraker/Klipper printer.
 
 ---
