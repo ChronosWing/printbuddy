@@ -1458,6 +1458,37 @@ describe('PrintersPage', () => {
   });
 
   describe('manual controls', () => {
+    it('keeps the Bambu light control on its existing OFF path', async () => {
+      server.use(
+        http.get('/api/v1/printers/:id/status', () => HttpResponse.json({ ...mockPrinterStatus, chamber_light: false })),
+      );
+      render(<PrintersPage />);
+      await screen.findByText('X1 Carbon');
+      const buttons = await screen.findAllByTitle('Turn on chamber light');
+      expect(buttons.every((button) => within(button).queryByText('?') === null)).toBe(true);
+    });
+
+    it('shows the U1 physical light state on a fresh page load', async () => {
+      server.use(
+        http.get('/api/v1/printers/', () => HttpResponse.json([{ ...mockPrinters[0], name: 'U1', provider: 'klipper', model: 'Snapmaker U1' }])),
+        http.get('/api/v1/printers/:id/status', () => HttpResponse.json({ ...mockPrinterStatus, chamber_light: true })),
+      );
+      render(<PrintersPage />);
+      await screen.findByText('U1');
+      expect((await screen.findAllByTitle('Turn off chamber light')).length).toBeGreaterThan(0);
+    });
+
+    it('shows unknown U1 light state without depicting the light as off', async () => {
+      server.use(
+        http.get('/api/v1/printers/', () => HttpResponse.json([{ ...mockPrinters[0], name: 'U1', provider: 'klipper', model: 'Snapmaker U1' }])),
+        http.get('/api/v1/printers/:id/status', () => HttpResponse.json({ ...mockPrinterStatus, chamber_light: null })),
+      );
+      render(<PrintersPage />);
+      await screen.findByText('U1');
+      const buttons = await screen.findAllByTitle('Light state unknown; turn on');
+      expect(buttons.some((button) => within(button).queryByText('?'))).toBe(true);
+    });
+
     it('hides manual controls for Prusa printers because PrusaLink model controls are unsupported', async () => {
       server.use(
         http.get('/api/v1/printers/', () => HttpResponse.json([{ ...mockPrinters[0], name: 'Boženka', provider: 'prusalink', model: 'Prusa MK4S' }])),

@@ -1,3 +1,5 @@
+import asyncio
+import json
 from unittest.mock import Mock
 
 import httpx
@@ -108,10 +110,13 @@ def test_u1_light_state_is_unknown_until_command_succeeds(monkeypatch):
     assert client.state.chamber_light is None
     post = Mock(return_value={})
     monkeypatch.setattr(client, "_post", post)
+    states = iter([{"color_data": [[0, 0, 0, 1]]}, {"color_data": [[0, 0, 0, 0]]}])
+    monkeypatch.setattr(client, "_query_u1_cavity_light", lambda: next(states))
     assert client.set_chamber_light(True) is True
     assert client.state.chamber_light is True
     post.assert_called_with("printer/gcode/script", {"script": "SET_LED LED=cavity_led WHITE=1"})
     assert client.set_chamber_light(False) is True
+    assert client.state.chamber_light is False
     post.assert_called_with("printer/gcode/script", {"script": "SET_LED LED=cavity_led WHITE=0"})
 
 
@@ -136,4 +141,110 @@ def test_u1_light_failure_keeps_unknown_state(monkeypatch):
     monkeypatch.setattr(client, "_post", Mock(side_effect=httpx.ConnectError("offline")))
     with pytest.raises(httpx.ConnectError):
         client.set_chamber_light(True)
+    assert client.state.chamber_light is None
+
+
+@pytest.mark.parametrize("white,expected", [(1.0, True), (0.0, False), (None, None)])
+def test_u1_startup_reads_physical_light_state_without_command(monkeypatch, white, expected):
+    client = MoonrakerPrinterClient("http://u1:7125", printer_model="Snapmaker U1")
+    post = Mock()
+    monkeypatch.setattr(client, "_post", post)
+    monkeypatch.setattr(client, "_get", lambda path, **kwargs: {"klippy_state": "ready"})
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+    monkeypatch.setattr(
+        client,
+        "_query_objects",
+        lambda names: (
+            {"led cavity_led": {"color_data": [[0, 0, 0, white]]}}
+            if names == ["led cavity_led"] and white is not None
+            else {"print_stats": {"state": "standby"}}
+        ),
+    )
+    client.connect()
+    assert client.state.chamber_light is expected
+    post.assert_not_called()
+
+
+def test_u1_reconnect_discards_stale_light_state(monkeypatch):
+    client = MoonrakerPrinterClient("http://u1:7125", printer_model="Snapmaker U1")
+    values = iter([{"color_data": [[0, 0, 0, 1]]}, None, {"color_data": [[0, 0, 0, 0]]}])
+    monkeypatch.setattr(client, "_query_u1_cavity_light", lambda: next(values))
+    monkeypatch.setattr(client, "_query_objects", lambda names: {"print_stats": {"state": "standby"}})
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+    assert client.request_status_update() is True
+    assert client.state.chamber_light is True
+    client.disconnect()
+    assert client.state.chamber_light is None
+    assert client.request_status_update() is True
+    assert client.state.chamber_light is None
+    assert client.request_status_update() is True
+    assert client.state.chamber_light is False
+
+
+@pytest.mark.asyncio
+async def test_u1_light_subscription_applies_external_changes(monkeypatch):
+    import websockets.legacy.client
+
+    seen = []
+    client = MoonrakerPrinterClient(
+        "http://u1:7125", printer_model="Snapmaker U1", on_state_change=lambda state: seen.append(state.chamber_light)
+    )
+    ready = asyncio.Event()
+
+    class FakeWebsocket:
+        def __init__(self):
+            self.sent = None
+            self.messages = iter(
+                [
+                    {"id": 1, "result": {"status": {"led cavity_led": {"color_data": [[0, 0, 0, 1]]}}}},
+                    {
+                        "method": "notify_status_update",
+                        "params": [{"led cavity_led": {"color_data": [[0, 0, 0, 0]]}}, 1],
+                    },
+                    {"method": "notify_klippy_disconnected"},
+                ]
+            )
+
+        async def send(self, value):
+            self.sent = json.loads(value)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                message = next(self.messages)
+            except StopIteration:
+                ready.set()
+                await asyncio.Future()
+            return json.dumps(message)
+
+    websocket = FakeWebsocket()
+
+    class Connection:
+        async def __aenter__(self):
+            return websocket
+
+        async def __aexit__(self, *args):
+            return False
+
+    monkeypatch.setattr(websockets.legacy.client, "connect", lambda *args, **kwargs: Connection())
+    task = asyncio.create_task(client.watch_u1_cavity_light())
+    await asyncio.wait_for(ready.wait(), 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert websocket.sent["method"] == "printer.objects.subscribe"
+    assert seen == [True, False, None]
+
+
+def test_generic_moonraker_light_behavior_unchanged(monkeypatch):
+    client = MoonrakerPrinterClient("http://klipper:7125", printer_model="Generic Klipper")
+    queries = []
+    monkeypatch.setattr(
+        client, "_query_objects", lambda names: queries.append(names) or {"print_stats": {"state": "standby"}}
+    )
+    monkeypatch.setattr(client, "_available_objects", lambda: [])
+    client.request_status_update()
+    assert ["led cavity_led"] not in queries
     assert client.state.chamber_light is None

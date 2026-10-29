@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import math
 import re
 import time
@@ -13,6 +15,8 @@ from urllib.parse import quote, urljoin, urlparse, urlunparse
 import httpx
 
 from backend.app.services.bambu_mqtt import FilaSwitchState, NozzleInfo, PrintOptions
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -136,6 +140,17 @@ def _safe_float(value: Any) -> float | None:
         return float(str(value).strip())
     except (TypeError, ValueError):
         return None
+
+
+def _u1_cavity_light_state(values: Any) -> bool | None:
+    """Read the white channel from U1 Klipper's led cavity_led status."""
+    if not isinstance(values, dict):
+        return None
+    colors = values.get("color_data")
+    if not isinstance(colors, list) or not colors or not isinstance(colors[0], (list, tuple)) or len(colors[0]) < 4:
+        return None
+    white = _safe_float(colors[0][3])
+    return white > 0 if white is not None and math.isfinite(white) else None
 
 
 def _u1_used_logical_tools(metadata: dict[str, Any]) -> list[int]:
@@ -706,6 +721,74 @@ class MoonrakerPrinterClient:
         query = "printer/objects/query?" + "&".join(quote(name, safe="") for name in object_names)
         objects = self._get(query)
         return objects.get("status", objects) if isinstance(objects, dict) else {}
+
+    def _query_u1_cavity_light(self) -> dict[str, Any] | None:
+        """Best-effort read of the firmware's actual LED status."""
+        try:
+            values = self._query_objects(["led cavity_led"]).get("led cavity_led")
+            return values if isinstance(values, dict) else None
+        except Exception:  # noqa: BLE001 - optional LED read must not mark the printer offline
+            return None
+
+    def _apply_u1_cavity_light(self, values: Any) -> None:
+        light = _u1_cavity_light_state(values)
+        if light == self.state.chamber_light:
+            return
+        self.state.chamber_light = light
+        if self.on_state_change:
+            self.on_state_change(self.state)
+
+    async def watch_u1_cavity_light(self) -> None:
+        """Subscribe to external U1 LED changes; HTTP status polling remains fallback."""
+        if not self._is_snapmaker_u1():
+            return
+        from websockets.legacy.client import connect as websocket_connect
+
+        while True:
+            subscribed = False
+            try:
+                url = urlparse(self.base_url)
+                scheme = "wss" if url.scheme == "https" else "ws"
+                websocket_url = urlunparse((scheme, url.netloc, "/websocket", "", "", ""))
+                async with websocket_connect(
+                    websocket_url, extra_headers=self._headers, open_timeout=self.timeout, close_timeout=1
+                ) as websocket:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "method": "printer.objects.subscribe",
+                                "params": {"objects": {"led cavity_led": ["color_data"]}},
+                                "id": 1,
+                            }
+                        )
+                    )
+                    async for raw in websocket:
+                        message = json.loads(raw)
+                        if not isinstance(message, dict):
+                            continue
+                        if message.get("id") == 1 and "error" in message:
+                            raise ValueError("Moonraker rejected cavity LED subscription")
+                        if message.get("method") in {"notify_klippy_disconnected", "notify_klippy_shutdown"}:
+                            self._apply_u1_cavity_light(None)
+                            continue
+                        if message.get("id") == 1:
+                            subscribed = True
+                            values = message.get("result", {}).get("status", {}).get("led cavity_led")
+                        elif message.get("method") == "notify_status_update":
+                            params = message.get("params") or []
+                            values = params[0].get("led cavity_led") if params and isinstance(params[0], dict) else None
+                        else:
+                            continue
+                        if values is not None:
+                            self._apply_u1_cavity_light(values)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - keep HTTP status polling available
+                logger.debug("U1 cavity LED subscription unavailable: %s", exc)
+            if subscribed:
+                self._apply_u1_cavity_light(None)
+            await asyncio.sleep(3)
 
     def _is_elegoo_printer(self) -> bool:
         return "elegoo" in self.printer_model.lower()
@@ -1422,6 +1505,8 @@ class MoonrakerPrinterClient:
         return True
 
     def connect(self) -> None:
+        if self._is_snapmaker_u1():
+            self.state.chamber_light = None
         last_exc: Exception | None = None
         for candidate in self.base_url_candidates:
             try:
@@ -1447,6 +1532,8 @@ class MoonrakerPrinterClient:
 
     def disconnect(self, timeout: float = 0) -> None:  # noqa: ARG002 - kept for Bambu client compatibility
         self.state.connected = False
+        if self._is_snapmaker_u1():
+            self.state.chamber_light = None
         self._u1_spool_cache.clear()
 
     def check_staleness(self) -> bool:
@@ -1454,6 +1541,8 @@ class MoonrakerPrinterClient:
             self.request_status_update()
         except Exception:
             self.state.connected = False
+            if self._is_snapmaker_u1():
+                self.state.chamber_light = None
         return self.state.connected
 
     def _build_lifecycle_payload(self) -> dict[str, Any]:
@@ -1553,6 +1642,11 @@ class MoonrakerPrinterClient:
         snapmaker_u1_status = self._query_snapmaker_u1_status(available_objects)
         if snapmaker_u1_status:
             status.update(snapmaker_u1_status)
+        if self._is_snapmaker_u1():
+            led_status = self._query_u1_cavity_light()
+            if led_status is not None:
+                status["led cavity_led"] = led_status
+            self.state.chamber_light = _u1_cavity_light_state(led_status)
         self.state.connected = True
         self.state.raw_status = status
         self.state.raw_data = status
@@ -1740,10 +1834,12 @@ class MoonrakerPrinterClient:
     def set_chamber_light(self, on: bool) -> bool:
         if not self._is_snapmaker_u1():
             raise NotImplementedError("Chamber light control is not supported for this Moonraker printer")
-        self._post("printer/gcode/script", {"script": f"SET_LED LED=cavity_led WHITE={int(on)}"})
-        # The firmware does not report reliable LED brightness. This state is
-        # known only for this client session, after our own successful command.
-        self.state.chamber_light = on
+        try:
+            self._post("printer/gcode/script", {"script": f"SET_LED LED=cavity_led WHITE={int(on)}"})
+        except httpx.HTTPError:
+            self._apply_u1_cavity_light(None)
+            raise
+        self.state.chamber_light = _u1_cavity_light_state(self._query_u1_cavity_light())
         return True
 
     def start_print(self, filename: str, plate_id: int = 1, **kwargs: Any) -> bool:  # noqa: ARG002

@@ -207,6 +207,7 @@ class PrinterManager:
         self._on_bed_temp_update: Callable[[int, float], None] | None = None
         self._on_drying_complete: Callable[[int, int], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._u1_light_tasks: dict[int, asyncio.Task] = {}
         # Track who started the current print (Issue #206)
         self._current_print_user: dict[int, dict] = {}  # {printer_id: {"user_id": int, "username": str}}
         # Track printers awaiting plate-clear acknowledgment after a finished/failed print.
@@ -466,6 +467,8 @@ class PrinterManager:
         self._clients[printer_id] = client
         self._models[printer_id] = printer.model  # Cache model for feature detection
         self._printer_info[printer_id] = PrinterInfo(printer.name, printer.serial_number, provider)
+        if callable(getattr(client, "_is_snapmaker_u1", None)) and client._is_snapmaker_u1():
+            self._u1_light_tasks[printer_id] = asyncio.create_task(client.watch_u1_cavity_light())
 
         # Wait a moment for connection
         await asyncio.sleep(1)
@@ -473,6 +476,9 @@ class PrinterManager:
 
     def disconnect_printer(self, printer_id: int, timeout: float = 0):
         """Disconnect from a printer."""
+        task = self._u1_light_tasks.pop(printer_id, None)
+        if task:
+            task.cancel()
         if printer_id in self._clients:
             self._clients[printer_id].disconnect(timeout=timeout)
             del self._clients[printer_id]

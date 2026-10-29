@@ -150,6 +150,7 @@ export function EmbeddedCameraViewer({ printerId, printerName, viewerIndex = 0, 
     },
     onSuccess: (_, on) => {
       showToast(`Chamber light ${on ? 'on' : 'off'}`);
+      if (/snapmaker\s*u1/i.test(printer?.model || '')) queryClient.invalidateQueries({ queryKey: ['printerStatus', printerId] });
     },
     onError: (error: Error, _, context) => {
       if (context?.previousStatus) {
@@ -622,7 +623,7 @@ export function EmbeddedCameraViewer({ printerId, printerName, viewerIndex = 0, 
             className={`p-1 rounded disabled:opacity-50 ${status?.chamber_light ? 'bg-yellow-500/20 hover:bg-yellow-500/30' : 'hover:bg-bambu-dark-tertiary'}`}
             title={!hasPermission('printers:control') ? t('printers.permission.noControl') : status?.chamber_light == null ? `${t('camera.chamberLight')}: unknown` : t('camera.chamberLight')}
           >
-            <ChamberLight on={status?.chamber_light ?? false} className="w-3.5 h-3.5" />
+            {status?.chamber_light == null ? <span className="inline-block w-3.5 text-center">?</span> : <ChamberLight on={status.chamber_light} className="w-3.5 h-3.5" />}
           </button>
           <button
             onClick={() => setShowSkipObjectsModal(true)}

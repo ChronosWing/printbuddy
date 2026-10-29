@@ -2635,6 +2635,7 @@ function PrinterCard({
     },
     onSuccess: (_, on) => {
       showToast(`Chamber light ${on ? 'on' : 'off'}`);
+      if (isSnapmakerU1Provider) queryClient.invalidateQueries({ queryKey: ['printerStatus', printer.id] });
     },
     onError: (error: Error, _, context) => {
       // Rollback on error
@@ -4222,11 +4223,11 @@ function PrinterCard({
                           onClick={() => chamberLightMutation.mutate(!status.chamber_light)}
                           disabled={chamberLightMutation.isPending || !hasPermission('printers:control')}
                           className={`flex items-center gap-1 px-1.5 py-1 rounded transition-colors ${
-                            status.chamber_light ? 'bg-yellow-500/10 hover:bg-yellow-500/20' : 'bg-bambu-dark hover:bg-bambu-dark-tertiary'
+                            status.chamber_light ? 'bg-yellow-500/10 hover:bg-yellow-500/20' : status.chamber_light == null ? 'bg-bambu-dark text-bambu-gray' : 'bg-bambu-dark hover:bg-bambu-dark-tertiary'
                           } disabled:opacity-50 disabled:cursor-not-allowed`}
                           title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status.chamber_light == null ? 'Light state unknown; turn on' : status.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
                         >
-                          <ChamberLight on={status.chamber_light ?? false} className={`w-3.5 h-3.5 ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`} />
+                          {status.chamber_light == null ? <span className="w-3.5 text-center text-bambu-gray">?</span> : <ChamberLight on={status.chamber_light} className={`w-3.5 h-3.5 ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`} />}
                           <span className={`text-[10px] ${status.chamber_light ? 'text-yellow-400' : 'text-bambu-gray/50'}`}>
                             {status.chamber_light == null ? 'Unknown' : status.chamber_light ? t('common.on', 'On') : t('common.off', 'Off')}
                           </span>
@@ -5793,7 +5794,7 @@ function PrinterCard({
                     title={!hasPermission('printers:control') ? t('printers.permission.noControl') : (status?.chamber_light == null ? 'Light state unknown; turn on' : status.chamber_light ? t('printers.chamberLightOff') : t('printers.chamberLightOn'))}
                     className={status?.chamber_light ? '!border-yellow-500 !text-yellow-400 hover:!bg-yellow-500/20' : ''}
                   >
-                    <ChamberLight on={status?.chamber_light ?? false} className={`w-4 h-4 ${status?.chamber_light ? 'text-yellow-400' : ''}`} />
+                    {isSnapmakerU1Provider && status?.chamber_light == null ? <span className="w-4 text-center">?</span> : <ChamberLight on={status?.chamber_light ?? false} className={`w-4 h-4 ${status?.chamber_light ? 'text-yellow-400' : ''}`} />}
                   </Button>
                 </>
               )}
