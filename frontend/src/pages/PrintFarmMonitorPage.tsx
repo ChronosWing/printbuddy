@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
+  ScanLine,
   ArrowLeft,
   Bell,
   CheckCircle2,
@@ -36,6 +37,7 @@ import { classifyPrinterStatus } from '../utils/printerStatus';
 import { appAssetPath } from '../utils/assetPaths';
 import { getGlobalTrayId, resolveLoadedFilamentInfo, type ResolvedLoadedFilamentInfo, type SpoolmanSlotAssignmentLike } from '../utils/amsHelpers';
 import { useTheme } from '../contexts/ThemeContext';
+import { SpoolmanScanDialog } from '../components/SpoolmanScanDialog';
 
 interface MonitorPrinter {
   printer: Printer;
@@ -649,6 +651,7 @@ export function PrintFarmMonitorPage() {
   const [printerPage, setPrinterPage] = useState(0);
   const [secondaryPanel, setSecondaryPanel] = useState<'alerts' | 'projects' | 'activity' | null>(null);
   const [detailPrinterId, setDetailPrinterId] = useState<number | null>(null);
+  const [scanOpen, setScanOpen] = useState(false);
   const { mode } = useTheme();
   const theme = useMemo(() => getMonitorTheme(mode), [mode]);
 
@@ -738,6 +741,7 @@ export function PrintFarmMonitorPage() {
           <h1 className={`mr-auto text-base font-bold ${theme.text}`}>Farm Monitor</h1>
           <time className="font-mono text-base font-bold text-blue-300">{formatClock(now)}</time>
           <div className={`flex flex-wrap gap-x-3 text-sm ${theme.muted}`} aria-label="Printer counts"><span>{printing.length} printing</span><span>{idle.length} idle</span><span>{offline.length} offline</span></div>
+          <button type="button" onClick={() => setScanOpen(true)} className="flex min-h-11 items-center gap-2 rounded-lg border border-blue-500/50 px-3 text-sm font-semibold text-blue-200"><ScanLine className="h-5 w-5" /> Scan Filament</button>
           <button type="button" onClick={() => setSecondaryPanel('alerts')} className="min-h-11 rounded-lg border border-amber-500/40 px-3 text-sm font-semibold text-amber-300">Alerts {activeAlerts.length}</button>
         </header>
 
@@ -760,6 +764,7 @@ export function PrintFarmMonitorPage() {
         <p className={`mt-1 text-xs ${theme.muted}`}>Refreshes every {refreshSeconds}s · {version?.display_version ?? version?.version ? `v${version?.display_version ?? version?.version}` : 'PrintBuddy'}</p>
 
         {detailPrinter && <CompactPrinterDetail item={detailPrinter} filaments={compactFilaments.get(detailPrinter.printer.id) ?? []} theme={theme} onClose={() => setDetailPrinterId(null)} />}
+        {scanOpen && <SpoolmanScanDialog onClose={() => setScanOpen(false)} assignments={spoolmanSlotAssignments} />}
         {secondaryPanel && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2" role="presentation" onClick={() => setSecondaryPanel(null)}>
           <div role="dialog" aria-modal="true" aria-label={secondaryPanel === 'alerts' ? 'Farm alerts' : secondaryPanel === 'projects' ? 'Active projects' : 'Recent activity'} className={`max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-xl border p-3 ${theme.page}`} onClick={(event) => event.stopPropagation()}>
             <div className="mb-2 flex justify-end"><button type="button" autoFocus onClick={() => setSecondaryPanel(null)} className={`min-h-11 rounded-lg border px-4 ${theme.panelSoft}`}>Close</button></div>
@@ -786,6 +791,7 @@ export function PrintFarmMonitorPage() {
               <img src={appAssetPath(theme.logoPath)} alt="Printbuddy" className="h-12 w-auto" />
             </div>
             <h1 className={`min-w-0 truncate text-2xl font-bold tracking-tight sm:text-3xl ${theme.text}`}>Print Farm Monitor</h1>
+            <button type="button" onClick={() => setScanOpen(true)} className={`inline-flex min-h-11 items-center gap-2 rounded-xl border px-4 text-sm font-semibold ${theme.panelSoft} ${theme.text}`}><ScanLine className="h-5 w-5" /> Scan Filament</button>
           </div>
           <div className="flex min-w-0 flex-col gap-3 xl:items-end">
             <div className="text-left xl:text-right">
@@ -850,6 +856,7 @@ export function PrintFarmMonitorPage() {
           <div className="flex flex-wrap items-center gap-6"><span className="flex items-center gap-2"><Server className="h-5 w-5" /> Printbuddy&nbsp; {version?.display_version ?? version?.version ? `v${version?.display_version ?? version?.version}` : ''}</span><span>{now.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' })} • {formatClock(now)}</span></div>
         </footer>
       </div>
+      {scanOpen && <SpoolmanScanDialog onClose={() => setScanOpen(false)} assignments={spoolmanSlotAssignments} />}
     </main>
   );
 }

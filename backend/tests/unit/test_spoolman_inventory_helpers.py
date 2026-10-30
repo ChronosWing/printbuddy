@@ -96,6 +96,22 @@ MINIMAL_SPOOL = {
 
 
 class TestMapSpoolmanSpool:
+    def test_scan_fields_preserve_multicolor_and_missing_weight_state(self):
+        spool = {
+            **MINIMAL_SPOOL,
+            "filament": {
+                **MINIMAL_SPOOL["filament"],
+                "multi_color_hexes": ["#00ff00", "0000ff", "invalid"],
+                "weight": None,
+            },
+            "archived": True,
+        }
+        result = _map_spoolman_spool(spool)
+        assert result["extra_colors"] == "00FF00,0000FF"
+        assert result["spoolman_remaining_known"] is False
+        assert result["spoolman_nominal_weight_known"] is False
+        assert result["spoolman_archived"] is True
+
     def test_basic_mapping(self):
         result = _map_spoolman_spool(MINIMAL_SPOOL)
         assert result["id"] == 1

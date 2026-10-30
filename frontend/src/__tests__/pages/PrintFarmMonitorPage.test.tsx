@@ -243,6 +243,9 @@ describe('PrintFarmMonitorPage', () => {
     expect(screen.getByRole('article', { name: /Demo Bambu Lab P1S printer/i }).querySelector('img')).toBeInTheDocument();
     expect(screen.getByRole('article', { name: /Demo Bambu Lab P1S printer/i })).toHaveTextContent('Filament unavailable');
     expect(screen.getByRole('article', { name: /Demo Anycubic Kobra 2 printer/i })).toHaveTextContent('Filament unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Filament' }));
+    expect(screen.getByRole('dialog', { name: 'Scan filament' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('dialog', { name: 'Scan filament' }).querySelector('button')!);
     fireEvent.click(screen.getByRole('button', { name: 'Details for Demo Bambu Lab P1S' }));
     expect(screen.getByRole('dialog', { name: 'Demo Bambu Lab P1S details' })).toHaveTextContent('Loaded filament slots');
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
@@ -354,6 +357,9 @@ describe('PrintFarmMonitorPage', () => {
     render(<PrintFarmMonitorPage />);
 
     expect(await screen.findByRole('heading', { name: 'Print Farm Monitor' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Scan Filament' }));
+    expect(screen.getByRole('dialog', { name: 'Scan filament' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('dialog', { name: 'Scan filament' }).querySelector('button')!);
     expect(screen.getByRole('link', { name: /back to farm command center/i })).toHaveAttribute('href', '/farm-command-center');
     expect(screen.getByText(new Date('2025-05-23T10:42:00Z').toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }))).toBeInTheDocument();
     expect(screen.getByText(new Date('2025-05-23T10:42:00Z').toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' }))).toBeInTheDocument();

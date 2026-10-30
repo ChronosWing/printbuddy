@@ -197,6 +197,9 @@ describe('FarmCommandCenterPage', () => {
     expect(screen.getByText('Filament Stock')).toBeInTheDocument();
     expect(screen.getByText('Maintenance')).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /tv mode/i })).toHaveAttribute('href', '/farm-monitor');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Scan Filament' }));
+    expect(screen.getByRole('dialog', { name: 'Scan filament' })).toBeInTheDocument();
+    await userEvent.setup().click(within(screen.getByRole('dialog', { name: 'Scan filament' })).getByRole('button', { name: 'Close' }));
     expect(screen.getByRole('button', { name: /create group/i })).toBeInTheDocument();
     expect(screen.getAllByRole('link').some((link) => link.getAttribute('href') === '/inventory')).toBe(true);
     expect(screen.getAllByRole('link').some((link) => link.getAttribute('href') === '/maintenance')).toBe(true);

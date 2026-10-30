@@ -2769,6 +2769,9 @@ export interface InventorySpool {
   rgba: string | null;
   // Multi-colour gradient stops (#1154): comma-separated 6/8-char hex.
   extra_colors: string | null;
+  spoolman_remaining_known?: boolean;
+  spoolman_nominal_weight_known?: boolean;
+  spoolman_archived?: boolean;
   // Visual effect overlay: sparkle | wood | marble | glow | matte.
   effect_type: string | null;
   brand: string | null;

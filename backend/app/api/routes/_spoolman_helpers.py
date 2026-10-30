@@ -30,6 +30,10 @@ class MappedSpoolFields(TypedDict):
     color_name: str | None
     color_name_is_synthesized: bool
     rgba: str | None
+    extra_colors: str | None
+    spoolman_remaining_known: bool
+    spoolman_nominal_weight_known: bool
+    spoolman_archived: bool
     label_weight: int | None
     core_weight: int | None
     core_weight_catalog_id: None
@@ -246,6 +250,12 @@ def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
     raw_color = (filament.get("color_hex") or "").upper().removeprefix("#")
     color_hex: str = raw_color if _COLOR_HEX_RE.match(raw_color) else "808080"
     rgba: str = color_hex + "FF"
+    raw_multi_colors = filament.get("multi_color_hexes")
+    multi_colors = raw_multi_colors.split(",") if isinstance(raw_multi_colors, str) else raw_multi_colors if isinstance(raw_multi_colors, list) else []
+    extra_colors = ",".join(
+        color for token in multi_colors
+        if isinstance(token, str) and _COLOR_HEX_RE.match(color := token.strip().upper().removeprefix("#"))
+    ) or None
 
     label_weight: int = _safe_int(filament.get("weight"), 1000)
     real_used_weight: float = _safe_float(spool.get("used_weight"), 0.0)
@@ -310,6 +320,10 @@ def _map_spoolman_spool(spool: dict) -> MappedSpoolFields:
         "color_name": color_name,
         "color_name_is_synthesized": color_name_is_synthesized,
         "rgba": rgba,
+        "extra_colors": extra_colors,
+        "spoolman_remaining_known": remaining_raw is not None,
+        "spoolman_nominal_weight_known": filament.get("weight") is not None,
+        "spoolman_archived": bool(archived),
         "brand": vendor.get("name") or None,
         "label_weight": label_weight,
         "core_weight": _safe_int(

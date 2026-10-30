@@ -14,6 +14,7 @@ import {
   Plus,
   Printer as PrinterIcon,
   Search,
+  ScanLine,
   Server,
   Wrench,
   X,
@@ -30,6 +31,7 @@ import {
   type PrinterStatus,
 } from '../api/client';
 import { classifyPrinterStatus } from '../utils/printerStatus';
+import { SpoolmanScanDialog } from '../components/SpoolmanScanDialog';
 
 interface FleetPrinter {
   printer: Printer;
@@ -458,6 +460,7 @@ export function FarmCommandCenterPage() {
   const [groupFilter, setGroupFilter] = useState('all');
   const [showAlerts, setShowAlerts] = useState(false);
   const [showGroups, setShowGroups] = useState(false);
+  const [scanOpen, setScanOpen] = useState(false);
   const queryClient = useQueryClient();
 
   useEffect(() => {
@@ -551,6 +554,7 @@ export function FarmCommandCenterPage() {
               <Link to="/farm-monitor" className="inline-flex items-center gap-2 rounded-lg border border-bambu-dark-tertiary bg-bambu-dark px-3 py-2 text-sm font-semibold text-bambu-gray-light hover:border-blue-500 hover:text-white">
                 <Monitor className="h-4 w-4" /> TV Mode
               </Link>
+              <button type="button" onClick={() => setScanOpen(true)} className="inline-flex min-h-11 items-center gap-2 rounded-lg border border-blue-500/60 bg-bambu-dark px-3 text-sm font-semibold text-white hover:border-blue-400"><ScanLine className="h-5 w-5" /> Scan Filament</button>
             </div>
           </div>
         </header>
@@ -668,6 +672,7 @@ export function FarmCommandCenterPage() {
       </div>
       {showAlerts && <AlertsDialog alerts={commandCenterAlerts} onClose={() => setShowAlerts(false)} />}
       {showGroups && <PrinterGroupsDialog printers={printers} groups={printerGroups} onSave={savePrinterGroups} onClose={() => setShowGroups(false)} />}
+      {scanOpen && <SpoolmanScanDialog onClose={() => setScanOpen(false)} />}
     </div>
   );
 }
