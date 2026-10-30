@@ -29,11 +29,12 @@ import {
   type Printer,
   type PrinterMaintenanceOverview,
   type PrinterStatus,
+  type SpoolAssignment,
 } from '../api/client';
 import { getPrinterImage } from '../utils/printer';
 import { classifyPrinterStatus } from '../utils/printerStatus';
 import { appAssetPath } from '../utils/assetPaths';
-import { resolveLoadedFilamentInfo, type ResolvedLoadedFilamentInfo, type SpoolmanSlotAssignmentLike } from '../utils/amsHelpers';
+import { getGlobalTrayId, resolveLoadedFilamentInfo, type ResolvedLoadedFilamentInfo, type SpoolmanSlotAssignmentLike } from '../utils/amsHelpers';
 import { useTheme } from '../contexts/ThemeContext';
 
 interface MonitorPrinter {
@@ -70,6 +71,20 @@ interface MonitorThemeClasses {
 }
 
 const DEFAULT_REFRESH_SECONDS = 15;
+const COMPACT_VIEWPORT = '(max-width: 1100px) and (max-height: 700px)';
+
+function useCompactViewport(): boolean {
+  const [compact, setCompact] = useState(() => typeof window !== 'undefined' && window.matchMedia?.(COMPACT_VIEWPORT).matches || false);
+  useEffect(() => {
+    const media = window.matchMedia?.(COMPACT_VIEWPORT);
+    if (!media) return;
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
+  return compact;
+}
 
 function getMonitorTheme(mode: 'dark' | 'light'): MonitorThemeClasses {
   return {
@@ -392,6 +407,130 @@ function PrinterCard({ item, loadedFilament, theme }: { item: MonitorPrinter; lo
   );
 }
 
+interface CompactFilament {
+  slot: string;
+  name: string;
+  color: string | null;
+  remainingGrams: number | null;
+  remainingPct: number | null;
+  spoolId: number | null;
+  active: boolean;
+  manufacturer: string | null;
+  material: string | null;
+  filamentName: string | null;
+  colorName: string | null;
+}
+
+function getCompactFilaments(item: MonitorPrinter, loadedFilament: ResolvedLoadedFilamentInfo | null, localAssignments: SpoolAssignment[], spoolmanAssignments: SpoolmanSlotAssignmentLike[], spoolmanSpools: InventorySpool[]): CompactFilament[] {
+  const slots = (item.status?.ams ?? []).flatMap((unit) => (unit.tray ?? []).map((tray) => ({ unit, tray })));
+  const filaments = slots.flatMap(({ unit, tray }) => {
+    const assignedId = spoolmanAssignments.find((assignment) => assignment.printer_id === item.printer.id && assignment.ams_id === unit.id && assignment.tray_id === tray.id)?.spoolman_spool_id ?? tray.spoolman_spool_id;
+    const spool = spoolmanSpools.find((candidate) => candidate.id === assignedId)
+      ?? localAssignments.find((assignment) => assignment.printer_id === item.printer.id && assignment.ams_id === unit.id && assignment.tray_id === tray.id)?.spool;
+    if (!spool && !tray.tray_type && !tray.spoolman_filament_name) return [];
+    const remainingGrams = spool ? Math.max(0, spool.label_weight - spool.weight_used) : tray.remaining_weight ?? null;
+    const initialGrams = spool?.label_weight ?? tray.initial_weight;
+    return [{
+      slot: `${unit.name || (unit.id === 0 ? 'Slots' : `Unit ${unit.id}`)} · ${tray.id + 1}`,
+      name: spool ? [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ') : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '),
+      color: spool?.rgba ?? tray.tray_color,
+      remainingGrams,
+      remainingPct: initialGrams && initialGrams > 0 && remainingGrams !== null ? Math.round(remainingGrams / initialGrams * 100) : tray.remain >= 0 ? tray.remain : null,
+      spoolId: spool?.id ?? assignedId ?? null,
+      active: item.status?.connected === true && (tray.active === true || item.status.tray_now === getGlobalTrayId(unit.id, tray.id, false)),
+      manufacturer: spool?.brand ?? tray.spoolman_vendor ?? null,
+      material: spool?.material ?? tray.tray_type,
+      filamentName: spool?.subtype ?? tray.spoolman_filament_name ?? tray.tray_sub_brands ?? null,
+      colorName: spool?.color_name ?? null,
+    }];
+  });
+  for (const tray of item.status?.vt_tray ?? []) {
+    if (!tray.tray_type && !tray.spoolman_filament_name) continue;
+    const assignedId = spoolmanAssignments.find((assignment) => assignment.printer_id === item.printer.id && assignment.ams_id === 255 && assignment.tray_id === tray.id - 254)?.spoolman_spool_id ?? tray.spoolman_spool_id;
+    const spool = spoolmanSpools.find((candidate) => candidate.id === assignedId) ?? localAssignments.find((assignment) => assignment.printer_id === item.printer.id && assignment.ams_id === 255 && assignment.tray_id === tray.id - 254)?.spool;
+    const remainingGrams = spool ? Math.max(0, spool.label_weight - spool.weight_used) : tray.remaining_weight ?? null;
+    const initialGrams = spool?.label_weight ?? tray.initial_weight;
+    filaments.push({ slot: 'External spool', name: spool ? [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ') : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '), color: spool?.rgba ?? tray.tray_color, remainingGrams, remainingPct: initialGrams && initialGrams > 0 && remainingGrams !== null ? Math.round(remainingGrams / initialGrams * 100) : tray.remain >= 0 ? tray.remain : null, spoolId: spool?.id ?? assignedId ?? null, active: item.status?.connected === true && item.status.tray_now === tray.id, manufacturer: spool?.brand ?? tray.spoolman_vendor ?? null, material: spool?.material ?? tray.tray_type, filamentName: spool?.subtype ?? tray.spoolman_filament_name ?? tray.tray_sub_brands ?? null, colorName: spool?.color_name ?? null });
+  }
+  if (filaments.length || !loadedFilament) return filaments;
+  return [{ slot: loadedFilament.detail, name: loadedFilament.material, color: loadedFilament.color ?? null, remainingGrams: loadedFilament.spool ? Math.max(0, loadedFilament.spool.label_weight - loadedFilament.spool.weight_used) : null, remainingPct: loadedFilament.remainingPct ?? null, spoolId: loadedFilament.spool?.id ?? null, active: item.status?.connected === true && (loadedFilament.globalTrayId === item.status.tray_now || loadedFilament.tray?.active === true), manufacturer: loadedFilament.spool?.brand ?? null, material: loadedFilament.spool?.material ?? loadedFilament.tray?.tray_type ?? null, filamentName: loadedFilament.spool?.subtype ?? loadedFilament.tray?.spoolman_filament_name ?? null, colorName: loadedFilament.spool?.color_name ?? null }];
+}
+
+function CompactPrinterCard({ item, loadedFilament, onOpen, theme }: { item: MonitorPrinter; loadedFilament: ResolvedLoadedFilamentInfo | null; onOpen: () => void; theme: MonitorThemeClasses }) {
+  const { printer, status } = item;
+  const state = normalizeState(status);
+  const progress = status?.progress == null ? null : Math.min(100, Math.max(0, Math.round(status.progress)));
+  const nozzle = status?.temperatures?.nozzle;
+  const bed = status?.temperatures?.bed;
+  const warnings = status?.hms_errors?.length ?? 0;
+  const stateClasses = state === 'printing' ? 'bg-status-ok/15 text-status-ok' : state === 'idle' ? 'bg-bambu-green/15 text-bambu-green-light' : state === 'paused' ? 'bg-amber-500/15 text-amber-300' : state === 'offline' ? 'bg-bambu-dark-tertiary text-bambu-gray-light' : state === 'error' ? 'bg-red-500/15 text-red-300' : 'bg-orange-500/15 text-orange-300';
+  const activeFilament = (state === 'printing' || state === 'paused') && loadedFilament && (loadedFilament.globalTrayId === status?.tray_now || loadedFilament.tray?.active === true) ? loadedFilament : null;
+
+  return (
+    <article className={`h-full min-w-0 overflow-hidden rounded-xl border p-2 ${theme.card}`} aria-label={`${printer.name} printer`}>
+      <button type="button" onClick={onOpen} aria-label={`Details for ${printer.name}`} className="flex h-full w-full min-w-0 flex-col justify-start rounded-lg text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-bambu-green">
+        <div className="flex w-full min-w-0 gap-2">
+          <div className={`flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-lg border p-1 ${theme.imageBox}`}>
+            <img src={getPrinterImage(printer.model)} alt="" className={`max-h-full max-w-full object-contain ${state === 'offline' ? 'opacity-50' : ''}`} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[0.68rem] font-bold ${stateClasses}`}><span className="h-1.5 w-1.5 rounded-full bg-current" />{state.toUpperCase()}</span>
+            <h2 className={`mt-1 truncate text-sm font-bold ${theme.text}`}>{printer.name}</h2>
+            <p className={`truncate text-xs ${theme.muted}`}>{printer.model || printer.provider || 'Printer'}</p>
+          </div>
+        </div>
+        {state === 'printing' || state === 'paused' ? <div className="mt-1.5 w-full min-w-0">
+          <div className={`flex min-w-0 justify-between gap-2 text-xs font-semibold ${theme.text}`}><span className="truncate">{getJobName(item) || 'Active print'}</span><span className="shrink-0">{progress === null ? '—' : `${progress}%`}</span></div>
+          <div className="mt-1 h-2 overflow-hidden rounded-full bg-bambu-dark-tertiary"><div className="h-full rounded-full bg-gradient-to-r from-bambu-green-light to-bambu-green" style={{ width: `${progress ?? 0}%` }} /></div>
+          <div className={`mt-1 flex items-center justify-between gap-1 text-xs ${theme.muted}`}><span className="flex items-center gap-1"><Clock3 className="h-3.5 w-3.5" />ETA {formatEta(status?.remaining_time)}</span><span>{formatDuration(status?.remaining_time)} left</span></div>
+        </div> : <div className={`mt-1.5 w-full truncate text-sm font-semibold ${theme.text}`}>{state === 'offline' ? 'No connection' : state === 'error' ? 'Needs attention' : state === 'idle' ? 'Ready to print' : state === 'stopped' ? 'Print stopped' : 'Print paused'}</div>}
+        <div className={`mt-1.5 grid w-full grid-cols-2 overflow-hidden rounded-lg border ${theme.divider} ${theme.panelSoft}`}>
+          <div className={`flex items-center gap-1.5 border-r px-2 py-1 ${theme.divider}`}><Thermometer className="h-4 w-4 shrink-0 text-red-400" /><span className={`text-xs font-bold ${theme.text}`}>{nozzle == null ? '—' : `${Math.round(nozzle)}°C`}</span><span className={`text-[0.65rem] ${theme.muted}`}>Nozzle</span></div>
+          <div className="flex items-center justify-end gap-1.5 px-2 py-1"><Thermometer className="h-4 w-4 shrink-0 text-blue-400" /><span className={`text-xs font-bold ${theme.text}`}>{bed == null ? '—' : `${Math.round(bed)}°C`}</span><span className={`text-[0.65rem] ${theme.muted}`}>Bed</span></div>
+        </div>
+        {(state === 'printing' || state === 'paused') && <div className={`mt-1 flex w-full min-w-0 items-center gap-2 rounded-lg border px-2 py-1 ${theme.divider} ${theme.panelSoft}`}>
+          <span className={`h-7 w-7 shrink-0 rounded-lg border ${theme.divider}`} style={{ backgroundColor: activeFilament ? normalizeSpoolColor(activeFilament.color) || 'var(--bg-tertiary)' : 'var(--bg-tertiary)' }} />
+          <div className="min-w-0 flex-1"><div className={`truncate text-xs font-medium ${theme.text}`}>{activeFilament?.material || 'Filament unavailable'}</div>{activeFilament && <div className={`truncate text-[0.65rem] ${theme.muted}`}>{activeFilament.detail}</div>}</div>
+          <span className={`shrink-0 text-xs font-bold ${theme.muted}`}>{activeFilament?.remainingPct == null ? '—' : `${activeFilament.remainingPct}%`}</span>
+        </div>}
+        {(warnings > 0 || state === 'error' || state === 'offline') && <div className="mt-1 flex w-full min-w-0 items-center gap-1 text-xs font-semibold text-amber-300"><AlertTriangle className="h-4 w-4 shrink-0" /><span className="truncate">{warnings > 0 ? `${warnings} printer alert${warnings === 1 ? '' : 's'}` : state === 'offline' ? 'Printer offline' : 'Printer needs attention'}</span></div>}
+      </button>
+    </article>
+  );
+}
+
+function CompactPrinterDetail({ item, filaments, theme, onClose }: { item: MonitorPrinter; filaments: CompactFilament[]; theme: MonitorThemeClasses; onClose: () => void }) {
+  const { printer, status } = item;
+  const state = normalizeState(status);
+  const activePrint = state === 'printing' || state === 'paused';
+  const progress = status?.progress == null ? null : Math.min(100, Math.max(0, Math.round(status.progress)));
+  const temperatures = status?.temperatures;
+  const temperatureRows = [
+    { label: 'Nozzle', current: temperatures?.nozzle, target: temperatures?.nozzle_target, color: 'text-red-400' },
+    { label: 'Bed', current: temperatures?.bed, target: temperatures?.bed_target, color: 'text-blue-400' },
+    { label: 'Chamber', current: temperatures?.chamber, target: temperatures?.chamber_target, color: 'text-amber-400' },
+  ].filter((row) => row.current != null || row.target != null);
+  const warnings = status?.hms_errors ?? [];
+  const extraStatus = [
+    status?.wired_network ? 'Ethernet connected' : status?.wifi_signal != null ? `Wi-Fi ${status.wifi_signal} dBm` : null,
+    status?.door_open ? 'Door open' : null,
+    status?.timelapse ? 'Timelapse active' : null,
+    status?.firmware_version ? `Firmware ${status.firmware_version}` : null,
+  ].filter((detail): detail is string => Boolean(detail));
+  return <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2" role="presentation" onClick={onClose}>
+    <div role="dialog" aria-modal="true" aria-label={`${printer.name} details`} className={`max-h-[95vh] w-full max-w-3xl overflow-y-auto rounded-xl border ${theme.page}`} onClick={(event) => event.stopPropagation()}>
+      <div className={`sticky top-0 z-10 flex items-center gap-3 border-b p-3 ${theme.page} ${theme.divider}`}><img src={getPrinterImage(printer.model)} alt="" className="h-14 w-14 shrink-0 object-contain" /><div className="min-w-0 flex-1"><h2 className={`truncate text-lg font-bold ${theme.text}`}>{printer.name}</h2><p className={`text-sm ${theme.muted}`}>{printer.model || printer.provider} · {state.toUpperCase()} · {status?.connected === true ? 'Connected' : status?.connected === false ? 'Disconnected' : 'Connection unknown'}</p></div><button type="button" autoFocus onClick={onClose} className={`min-h-11 rounded-lg border px-4 ${theme.panelSoft}`}>Close</button></div>
+      <div className="space-y-3 p-3">
+        {(warnings.length > 0 || status?.door_open || status?.connected === false) && <section className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2" aria-label="Printer warnings"><h3 className="flex items-center gap-2 text-sm font-bold text-amber-300"><AlertTriangle className="h-4 w-4" />Warnings</h3><div className="mt-1 flex flex-wrap gap-2 text-xs text-amber-200">{status?.connected === false && <span>Printer disconnected</span>}{status?.door_open && <span>Door open</span>}{warnings.map((warning, index) => <span key={`${warning.code}-${index}`}>Printer alert {warning.code} · severity {warning.severity}</span>)}</div></section>}
+        {activePrint && <section className={`rounded-lg border p-3 ${theme.panelSoft}`} aria-label="Current print"><h3 className={`mb-1 flex items-center gap-2 text-xs font-bold uppercase ${theme.muted}`}><PrinterIcon className="h-4 w-4" />Current print</h3><div className={`break-words text-sm font-semibold [overflow-wrap:anywhere] ${theme.text}`}>{getJobName(item) || 'Active print'}</div><div className="mt-2 flex items-center justify-between text-sm"><span className={theme.muted}>Progress</span><strong>{progress === null ? '—' : `${progress}%`}</strong></div><div className="mt-1 h-2 overflow-hidden rounded-full bg-bambu-dark-tertiary"><div className="h-full rounded-full bg-gradient-to-r from-bambu-green-light to-bambu-green" style={{ width: `${progress ?? 0}%` }} /></div><div className={`mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs ${theme.muted}`}><span className="flex items-center gap-1"><Clock3 className="h-4 w-4" />ETA {formatEta(status?.remaining_time)}</span><span>{formatDuration(status?.remaining_time)} remaining</span>{(status?.layer_num != null || status?.total_layers != null) && <span className="flex items-center gap-1"><Layers className="h-4 w-4" />Layer {status?.layer_num ?? '—'} / {status?.total_layers ?? '—'}</span>}</div></section>}
+        {temperatureRows.length > 0 && <section aria-label="Temperatures"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><Thermometer className="h-4 w-4" />Temperatures</h3><div className="grid grid-cols-1 gap-2 sm:grid-cols-3">{temperatureRows.map((row) => <div key={row.label} className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${theme.panelSoft}`}><Thermometer className={`h-5 w-5 ${row.color}`} /><div><div className={`text-xs ${theme.muted}`}>{row.label}</div><div className={`text-sm font-bold ${theme.text}`}>{row.current == null ? '—' : `${Math.round(row.current)}°C`}{row.target != null && <span className={`ml-1 text-xs font-normal ${theme.muted}`}>/ {Math.round(row.target)}°C target</span>}</div></div></div>)}</div></section>}
+        {filaments.length > 0 && <section aria-label="Loaded filament slots"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><PackageOpen className="h-4 w-4" />Loaded filament slots · {filaments.length}</h3><div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filaments.map((filament, index) => <div key={`${filament.slot}-${index}`} className={`flex min-w-0 items-center gap-2 rounded-lg border p-2 ${theme.panelSoft}`}><span className={`h-10 w-10 shrink-0 rounded-lg border ${theme.divider}`} style={{ backgroundColor: normalizeSpoolColor(filament.color) || 'var(--bg-tertiary)' }} /><div className="min-w-0 flex-1"><div className={`flex flex-wrap items-center gap-1 text-xs font-semibold ${theme.text}`}>{filament.slot}{filament.active && <span className="rounded bg-bambu-green/20 px-1.5 py-0.5 text-[0.65rem] text-bambu-green-light">ACTIVE</span>}</div><div className={`break-words text-xs [overflow-wrap:anywhere] ${theme.text}`}>{[filament.manufacturer, filament.material, filament.filamentName, filament.colorName].filter(Boolean).join(' · ') || filament.name}</div>{filament.spoolId != null && <div className={`text-[0.65rem] ${theme.muted}`}>Spool #{filament.spoolId}</div>}</div><div className={`shrink-0 text-right text-xs font-bold ${theme.text}`}>{filament.remainingGrams === null ? '—' : `${Math.round(filament.remainingGrams)} g`}<div className={theme.muted}>{filament.remainingPct === null ? '—' : `${filament.remainingPct}%`}</div></div></div>)}</div></section>}
+        {extraStatus.length > 0 && <section aria-label="Additional status"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><Server className="h-4 w-4" />Additional status</h3><div className={`flex flex-wrap gap-2 text-xs ${theme.muted}`}>{extraStatus.map((detail) => <span key={detail} className={`rounded-lg border px-2 py-1.5 ${theme.panelSoft}`}>{detail}</span>)}</div></section>}
+      </div>
+    </div>
+  </div>;
+}
+
 function AlertsPanel({ alerts, theme }: { alerts: MonitorAlert[]; theme: MonitorThemeClasses }) {
   return (
     <section className={`min-w-0 overflow-hidden rounded-2xl border p-5 ${theme.card}`}>
@@ -504,6 +643,12 @@ function ActiveProjectsPanel({ projects, theme }: { projects: ProjectListItem[];
 
 export function PrintFarmMonitorPage() {
   const [now, setNow] = useState(() => new Date());
+  const compact = useCompactViewport();
+  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
+  const [viewportHeight, setViewportHeight] = useState(() => window.innerHeight);
+  const [printerPage, setPrinterPage] = useState(0);
+  const [secondaryPanel, setSecondaryPanel] = useState<'alerts' | 'projects' | 'activity' | null>(null);
+  const [detailPrinterId, setDetailPrinterId] = useState<number | null>(null);
   const { mode } = useTheme();
   const theme = useMemo(() => getMonitorTheme(mode), [mode]);
 
@@ -511,6 +656,19 @@ export function PrintFarmMonitorPage() {
     const timer = window.setInterval(() => setNow(new Date()), 1000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    const update = () => { setViewportWidth(window.innerWidth); setViewportHeight(window.innerHeight); };
+    window.addEventListener('resize', update);
+    return () => window.removeEventListener('resize', update);
+  }, []);
+
+  useEffect(() => {
+    if (!secondaryPanel && detailPrinterId === null) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === 'Escape') { setSecondaryPanel(null); setDetailPrinterId(null); } };
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [secondaryPanel, detailPrinterId]);
 
   const { data: uiPreferences } = useQuery({ queryKey: ['ui-preferences'], queryFn: api.getUiPreferences, staleTime: 30_000 });
   const refreshSeconds = normalizeRefreshSeconds(uiPreferences?.print_farm_monitor_refresh_interval);
@@ -544,6 +702,7 @@ export function PrintFarmMonitorPage() {
     spoolmanSpools,
     spoolmanSlotAssignments: spoolmanSlotAssignments as SpoolmanSlotAssignmentLike[],
   })])), [localAssignments, monitorPrinters, spoolmanSlotAssignments, spoolmanSpools]);
+  const compactFilaments = useMemo(() => new Map(monitorPrinters.map((item) => [item.printer.id, getCompactFilaments(item, loadedFilaments.get(item.printer.id) ?? null, localAssignments, spoolmanSlotAssignments as SpoolmanSlotAssignmentLike[], spoolmanSpools)])), [loadedFilaments, localAssignments, monitorPrinters, spoolmanSlotAssignments, spoolmanSpools]);
   const printing = monitorPrinters.filter((item) => normalizeState(item.status) === 'printing');
   const paused = monitorPrinters.filter((item) => normalizeState(item.status) === 'paused');
   const stopped = monitorPrinters.filter((item) => normalizeState(item.status) === 'stopped');
@@ -559,8 +718,57 @@ export function PrintFarmMonitorPage() {
   const nextCompletion = printing
     .filter((item) => item.status?.remaining_time !== null && item.status?.remaining_time !== undefined)
     .sort((a, b) => (a.status?.remaining_time ?? 99999) - (b.status?.remaining_time ?? 99999))[0];
-  const visiblePrinters = monitorPrinters.slice(0, 8);
+  const visiblePrinters = monitorPrinters;
   const utilizationStyle = { background: `conic-gradient(var(--accent) ${utilization * 3.6}deg, var(--bg-tertiary) 0deg)` };
+  const compactColumns = Math.max(1, Math.floor((viewportWidth - 8) / 288));
+  const compactRows = Math.max(1, Math.floor((viewportHeight - 132) / 218));
+  const compactPageSize = compactColumns * compactRows;
+  const compactPageCount = Math.max(1, Math.ceil(monitorPrinters.length / compactPageSize));
+  const currentPrinterPage = Math.min(printerPage, compactPageCount - 1);
+  const compactPrinters = monitorPrinters.slice(currentPrinterPage * compactPageSize, (currentPrinterPage + 1) * compactPageSize);
+  const detailPrinter = monitorPrinters.find((item) => item.printer.id === detailPrinterId);
+
+  useEffect(() => { setPrinterPage((page) => Math.min(page, compactPageCount - 1)); }, [compactPageCount]);
+
+  if (compact) {
+    return (
+      <main className={`flex h-screen min-h-0 flex-col overflow-hidden p-2 ${theme.page}`} data-monitor-theme={mode} data-testid="compact-farm-monitor">
+        <header className={`flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 rounded-xl border px-3 py-2 ${theme.panelSoft}`}>
+          <Link to="/farm-command-center" aria-label="Back to Farm Command Center" className={`flex h-11 w-11 items-center justify-center rounded-lg border ${theme.border}`}><ArrowLeft className="h-5 w-5" /></Link>
+          <h1 className={`mr-auto text-base font-bold ${theme.text}`}>Farm Monitor</h1>
+          <time className="font-mono text-base font-bold text-blue-300">{formatClock(now)}</time>
+          <div className={`flex flex-wrap gap-x-3 text-sm ${theme.muted}`} aria-label="Printer counts"><span>{printing.length} printing</span><span>{idle.length} idle</span><span>{offline.length} offline</span></div>
+          <button type="button" onClick={() => setSecondaryPanel('alerts')} className="min-h-11 rounded-lg border border-amber-500/40 px-3 text-sm font-semibold text-amber-300">Alerts {activeAlerts.length}</button>
+        </header>
+
+        <section aria-label="Printers" className="mt-2 grid min-h-0 min-w-0 flex-1 gap-2" style={{ gridTemplateColumns: `repeat(${compactColumns}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${compactRows}, minmax(0, 1fr))` }} data-testid="compact-printer-grid">
+          {compactPrinters.map((item) => <CompactPrinterCard key={item.printer.id} item={item} loadedFilament={loadedFilaments.get(item.printer.id) ?? null} onOpen={() => setDetailPrinterId(item.printer.id)} theme={theme} />)}
+          {monitorPrinters.length === 0 && <p className={`rounded-xl border p-4 ${theme.panelSoft}`}>No printers configured.</p>}
+        </section>
+
+        <nav aria-label="Printer pages" className="mt-2 flex shrink-0 flex-wrap items-center justify-between gap-2">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setSecondaryPanel('projects')} className={`min-h-11 rounded-lg border px-3 text-sm ${theme.panelSoft}`}>Projects {activeProjects.length}</button>
+            <button type="button" onClick={() => setSecondaryPanel('activity')} className={`min-h-11 rounded-lg border px-3 text-sm ${theme.panelSoft}`}>Activity</button>
+          </div>
+          {compactPageCount > 1 && <div className="flex items-center gap-2">
+            <button type="button" disabled={currentPrinterPage === 0} onClick={() => setPrinterPage(currentPrinterPage - 1)} className={`min-h-11 rounded-lg border px-3 text-sm disabled:opacity-40 ${theme.panelSoft}`}>Previous printers</button>
+            <span className={`text-sm ${theme.muted}`}>Page {currentPrinterPage + 1} of {compactPageCount}</span>
+            <button type="button" disabled={currentPrinterPage >= compactPageCount - 1} onClick={() => setPrinterPage(currentPrinterPage + 1)} className={`min-h-11 rounded-lg border px-3 text-sm disabled:opacity-40 ${theme.panelSoft}`}>Next printers</button>
+          </div>}
+        </nav>
+        <p className={`mt-1 text-xs ${theme.muted}`}>Refreshes every {refreshSeconds}s · {version?.display_version ?? version?.version ? `v${version?.display_version ?? version?.version}` : 'PrintBuddy'}</p>
+
+        {detailPrinter && <CompactPrinterDetail item={detailPrinter} filaments={compactFilaments.get(detailPrinter.printer.id) ?? []} theme={theme} onClose={() => setDetailPrinterId(null)} />}
+        {secondaryPanel && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-2" role="presentation" onClick={() => setSecondaryPanel(null)}>
+          <div role="dialog" aria-modal="true" aria-label={secondaryPanel === 'alerts' ? 'Farm alerts' : secondaryPanel === 'projects' ? 'Active projects' : 'Recent activity'} className={`max-h-[95vh] w-full max-w-2xl overflow-y-auto rounded-xl border p-3 ${theme.page}`} onClick={(event) => event.stopPropagation()}>
+            <div className="mb-2 flex justify-end"><button type="button" autoFocus onClick={() => setSecondaryPanel(null)} className={`min-h-11 rounded-lg border px-4 ${theme.panelSoft}`}>Close</button></div>
+            {secondaryPanel === 'alerts' ? <AlertsPanel alerts={activeAlerts} theme={theme} /> : secondaryPanel === 'projects' ? <ActiveProjectsPanel projects={activeProjects} theme={theme} /> : <ActivityPanel items={[...printing, ...paused, ...stopped, ...offline, ...errors]} theme={theme} />}
+          </div>
+        </div>}
+      </main>
+    );
+  }
 
   return (
     <main className={`min-h-screen overflow-x-hidden ${theme.page}`} data-monitor-theme={mode}>

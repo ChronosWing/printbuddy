@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
-import { screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { render } from '../utils';
 import { server } from '../mocks/server';
@@ -105,6 +105,9 @@ describe('PrintFarmMonitorPage', () => {
   beforeEach(() => {
     vi.setSystemTime(new Date('2025-05-23T10:42:00Z'));
     vi.mocked(localStorage.getItem).mockReset();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1280 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 600 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: false, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
     server.use(
       http.get('/api/v1/printers/', () => HttpResponse.json(printers)),
       http.get('/api/v1/printers/:id/status', ({ params }) => HttpResponse.json(statusFor(Number(params.id)))),
@@ -223,6 +226,128 @@ describe('PrintFarmMonitorPage', () => {
         },
       ]))
     );
+  });
+
+  it('uses the compact TV layout at 1024 × 600 and keeps secondary panels available', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    render(<PrintFarmMonitorPage />);
+
+    expect(await screen.findByTestId('compact-farm-monitor')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('article', { name: /Demo Bambu Lab P1S printer/i })).toBeInTheDocument());
+    expect(screen.getByTestId('compact-printer-grid')).toHaveStyle({ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' });
+    expect(screen.getByTestId('compact-printer-grid')).toHaveStyle({ gridTemplateRows: 'repeat(2, minmax(0, 1fr))' });
+    expect(screen.getByText('42%')).toBeInTheDocument();
+    expect(screen.getByText('218°C')).toBeInTheDocument();
+    expect(screen.getByText('60°C')).toBeInTheDocument();
+    expect(screen.getByRole('article', { name: /Demo Bambu Lab P1S printer/i }).querySelector('img')).toBeInTheDocument();
+    expect(screen.getByRole('article', { name: /Demo Bambu Lab P1S printer/i })).toHaveTextContent('Filament unavailable');
+    expect(screen.getByRole('article', { name: /Demo Anycubic Kobra 2 printer/i })).toHaveTextContent('Filament unavailable');
+    fireEvent.click(screen.getByRole('button', { name: 'Details for Demo Bambu Lab P1S' }));
+    expect(screen.getByRole('dialog', { name: 'Demo Bambu Lab P1S details' })).toHaveTextContent('Loaded filament slots');
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(screen.queryByText('Farm Utilization')).not.toBeInTheDocument();
+    expect(screen.queryByText('Total Printers')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /alerts/i }));
+    expect(screen.getByRole('dialog', { name: 'Farm alerts' })).toHaveTextContent('LOW FILAMENT');
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    fireEvent.click(screen.getByRole('button', { name: /projects/i }));
+    expect(screen.getByRole('dialog', { name: 'Active projects' })).toHaveTextContent('Gridfinity Organizer Set');
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('button', { name: 'Activity' }));
+    expect(screen.getByRole('dialog', { name: 'Recent activity' })).toBeInTheDocument();
+  });
+
+  it('makes every printer reachable in compact TV mode without a fixed eight-printer limit', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(http.get('/api/v1/printers/', () => HttpResponse.json(Array.from({ length: 10 }, (_, index) => ({ ...printers[0], id: index + 1, name: `Printer ${index + 1}` })))));
+    render(<PrintFarmMonitorPage />);
+
+    await waitFor(() => expect(screen.getByText('Printer 1')).toBeInTheDocument());
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument();
+    expect(screen.getByText('Printer 6')).toBeInTheDocument();
+    expect(screen.queryByText('Printer 7')).not.toBeInTheDocument();
+    expect(screen.queryByText('Printer 10')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next printers' }));
+    expect(screen.getByText('Printer 7')).toBeInTheDocument();
+    expect(screen.getByText('Printer 10')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Next printers' })).toBeDisabled();
+  });
+
+  it('reduces the compact grid to two columns and one row at 800 × 480', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 });
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 480 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(http.get('/api/v1/printers/', () => HttpResponse.json(Array.from({ length: 6 }, (_, index) => ({ ...printers[0], id: index + 1, name: `Printer ${index + 1}` })))));
+    render(<PrintFarmMonitorPage />);
+
+    await waitFor(() => expect(screen.getByText('Printer 1')).toBeInTheDocument());
+    expect(screen.getByTestId('compact-printer-grid')).toHaveStyle({ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gridTemplateRows: 'repeat(1, minmax(0, 1fr))' });
+    expect(screen.getByText('Page 1 of 3')).toBeInTheDocument();
+    expect(screen.queryByText('Printer 3')).not.toBeInTheDocument();
+  });
+
+  it('shows only the active slot on the compact card and all loaded slots in its read-only detail', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(http.get('/api/v1/printers/:id/status', ({ params }) => {
+      const status = statusFor(Number(params.id));
+      return HttpResponse.json(Number(params.id) === 1 ? {
+        ...status, tray_now: 0, ams: [{ id: 0, name: 'AMS', tray: [
+          { id: 0, tray_type: 'PLA', tray_color: '3377CC', remain: 72 },
+          { id: 1, tray_type: 'PETG', tray_color: 'CC4433', remain: 10 },
+        ] }],
+      } : status);
+    }));
+    render(<PrintFarmMonitorPage />);
+
+    const card = await screen.findByRole('article', { name: 'Demo Bambu Lab P1S printer' });
+    await waitFor(() => expect(card).toHaveTextContent('PLA'));
+    expect(card).not.toHaveTextContent('PETG');
+    fireEvent.click(screen.getByRole('button', { name: 'Details for Demo Bambu Lab P1S' }));
+    const detail = screen.getByRole('dialog', { name: 'Demo Bambu Lab P1S details' });
+    expect(detail).toHaveTextContent('PLA');
+    expect(detail).toHaveTextContent('PETG');
+  });
+
+  it('hides filament on an idle overview card but shows loaded slots in its detail', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(http.get('/api/v1/printers/:id/status', ({ params }) => {
+      const status = statusFor(Number(params.id));
+      return HttpResponse.json(Number(params.id) === 2 ? { ...status, state: 'IDLE', tray_now: 0, ams: [{ id: 0, name: 'AMS Lite', tray: [{ id: 0, tray_type: 'PLA', tray_color: '7755AA', remain: 66 }] }] } : status);
+    }));
+    render(<PrintFarmMonitorPage />);
+    const card = await screen.findByRole('article', { name: 'Demo Anycubic Kobra 2 printer' });
+    expect(card).not.toHaveTextContent('Filament');
+    fireEvent.click(screen.getByRole('button', { name: 'Details for Demo Anycubic Kobra 2' }));
+    expect(screen.getByRole('dialog', { name: 'Demo Anycubic Kobra 2 details' })).toHaveTextContent('PLA');
+    expect(screen.queryByRole('region', { name: 'Current print' })).not.toBeInTheDocument();
+  });
+
+  it('switches layouts when the viewport becomes constrained and keeps all printers in large TV mode', async () => {
+    const listeners = new Set<() => void>();
+    const media = {
+      matches: false,
+      addEventListener: (_event: string, listener: () => void) => listeners.add(listener),
+      removeEventListener: (_event: string, listener: () => void) => listeners.delete(listener),
+    };
+    vi.stubGlobal('matchMedia', vi.fn(() => media));
+    server.use(http.get('/api/v1/printers/', () => HttpResponse.json(Array.from({ length: 10 }, (_, index) => ({ ...printers[0], id: index + 1, name: `Printer ${index + 1}` })))));
+    render(<PrintFarmMonitorPage />);
+
+    expect(await screen.findByText('Printer 10')).toBeInTheDocument();
+    expect(screen.queryByTestId('compact-farm-monitor')).not.toBeInTheDocument();
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    act(() => {
+      media.matches = true;
+      listeners.forEach((listener) => listener());
+      fireEvent.resize(window);
+    });
+    expect(screen.getByTestId('compact-farm-monitor')).toBeInTheDocument();
+    expect(screen.getByText('Page 1 of 2')).toBeInTheDocument();
   });
 
   it('renders the TV-style print farm overview from live printer status', async () => {
