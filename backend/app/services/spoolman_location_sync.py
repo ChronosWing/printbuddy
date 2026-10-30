@@ -22,6 +22,13 @@ def _complete_slot_snapshot(state) -> bool:
     units = state.raw_data.get("ams")
     if not isinstance(units, list) or not units:
         return False
+    if any(
+        isinstance(unit, dict)
+        and unit.get("module_type") == "snapmaker_u1"
+        and unit.get("native_spoolman_snapshot_complete") is not True
+        for unit in units
+    ):
+        return False
     for unit in units:
         if not isinstance(unit, dict) or not isinstance(unit.get("tray"), list):
             return False
@@ -191,6 +198,33 @@ async def sync_native_spool_slots(db: AsyncSession, client: SpoolmanClient, prin
     state = printer_manager.get_status(printer_id)
     if not state or not state.connected or not isinstance(ams_data, list):
         return
+    u1_units = [unit for unit in ams_data if isinstance(unit, dict) and unit.get("module_type") == "snapmaker_u1"]
+    if u1_units:
+        if len(ams_data) != 1 or len(u1_units) != 1:
+            return
+        unit = u1_units[0]
+        if unit.get("native_spoolman_snapshot_complete") is not True or unit.get("id") != 0:
+            return
+        trays = unit.get("tray")
+        if not isinstance(trays, list) or len(trays) != 4:
+            return
+        if any(
+            not isinstance(tray, dict)
+            or isinstance(tray.get("id"), bool)
+            or not isinstance(tray.get("id"), int)
+            for tray in trays
+        ) or {tray["id"] for tray in trays} != set(range(4)):
+            return
+        for tray in trays:
+            if "spoolman_spool_id" not in tray:
+                return
+            spool_id = tray["spoolman_spool_id"]
+            if spool_id is not None and (
+                isinstance(spool_id, bool) or not isinstance(spool_id, int) or spool_id <= 0
+            ):
+                return
+            if tray.get("native_spoolman") is not (spool_id is not None):
+                return
     slots: dict[tuple[int, int], int] = {}
     native_seen = False
     for unit in ams_data:
@@ -217,7 +251,8 @@ async def sync_native_spool_slots(db: AsyncSession, client: SpoolmanClient, prin
         {"printer_id": printer_id},
     )
     previous = {(row.ams_id, row.tray_id): row.spool_id for row in rows}
-    if previous == slots:
+    # Empty toolheads have no mirror row; compare only physical assignments.
+    if previous == {slot: spool_id for slot, spool_id in slots.items() if spool_id}:
         return
     affected = set(previous.values()) | set(slots.values())
     await db.execute(

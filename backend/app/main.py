@@ -1407,8 +1407,33 @@ def _should_send_progress_milestone(
     return False
 
 
+async def _sync_u1_native_locations_from_status(printer_id: int, state: PrinterState) -> None:
+    """Observe firmware-owned U1 slots without entering Bambu AMS handling."""
+    if not state.connected or not isinstance(state.raw_data, dict):
+        return
+    ams_data = state.raw_data.get("ams")
+    if not isinstance(ams_data, list) or not any(
+        isinstance(unit, dict) and unit.get("module_type") == "snapmaker_u1" for unit in ams_data
+    ):
+        return
+    try:
+        from backend.app.models.printer import Printer
+        from backend.app.services.spoolman_location_sync import sync_native_spool_slots
+
+        async with async_session() as db:
+            printer = await db.get(Printer, printer_id)
+            if not printer or not printer.spoolman_location_sync_enabled:
+                return
+            client = await get_spoolman_client()
+            if client:
+                await sync_native_spool_slots(db, client, printer_id, ams_data)
+    except Exception:
+        logging.getLogger(__name__).exception("Could not synchronize U1 native Spoolman slots for printer %s", printer_id)
+
+
 async def on_printer_status_change(printer_id: int, state: PrinterState):
     """Handle printer status changes - broadcast via WebSocket."""
+    await _sync_u1_native_locations_from_status(printer_id, state)
     # Only broadcast if something meaningful changed (reduce WebSocket spam)
     # Include rounded temperatures to detect meaningful temp changes (within 1 degree)
     temps = state.temperatures or {}

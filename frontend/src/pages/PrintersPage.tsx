@@ -4625,6 +4625,8 @@ function PrinterCard({
                                   kFactor: formatKValue(tray.k),
                                   fillLevel: effectiveFill,
                                   trayUuid: tray.tray_uuid || null,
+                                  firmwareManagedSpool: isSnapmakerU1Unit,
+                                  physicalSpoolId: isSnapmakerU1Unit ? tray.spoolman_spool_id ?? null : null,
                                   tagUid: tray.tag_uid || null,
                                   fillSource,
                                 } : null;
@@ -4766,7 +4768,7 @@ function PrinterCard({
                                     )}
                                     {status?.state !== 'RUNNING' && isSlotAssignmentOnlyUnit && amsSlotMenu?.amsId === ams.id && amsSlotMenu?.slotId === slotIdx && (
                                       <div className="absolute top-full left-0 mt-1 z-50 bg-bambu-dark-secondary border border-bambu-dark-tertiary rounded-lg shadow-xl py-1 min-w-[120px]">
-                                        {supportsSpoolAssignment && (
+                                        {supportsSpoolAssignment && !isSnapmakerU1Unit && (
                                           <button
                                             className="w-full px-3 py-1.5 text-left text-xs flex items-center gap-2 text-white hover:bg-bambu-dark-tertiary"
                                             onClick={(e) => {
@@ -4801,7 +4803,7 @@ function PrinterCard({
                                           // #1457: slot assignment is the user's most explicit action — it must
                                           // outrank the tag-link, which can be stale when a non-RFID slot's
                                           // fallback tag is still attached to a previous spool in Spoolman.
-                                          linkedSpoolId: slotAssignmentForFill?.spoolman_spool_id
+                                          linkedSpoolId: isSnapmakerU1Unit ? tray.spoolman_spool_id : slotAssignmentForFill?.spoolman_spool_id
                                             ?? (trayTag ? linkedSpools?.[trayTag]?.id : undefined),
                                           spoolmanUrl,
                                           syncMode: spoolmanSyncMode,
@@ -4821,7 +4823,7 @@ function PrinterCard({
                                           } : undefined,
                                           onUnlinkSpool: linkedSpool?.id ? () => unlinkSpoolMutation.mutate(linkedSpool.id) : undefined,
                                         }}
-                                        inventory={(() => {
+                                        inventory={isSnapmakerU1Unit ? undefined : (() => {
                                           if (spoolmanEnabled) {
                                             if (spoolmanLoading) return undefined;
                                             const slotAssignment = slotAssignmentForFill;
@@ -4907,7 +4909,7 @@ function PrinterCard({
                                             extruderId: mappedExtruderId,
                                           }),
                                         }}
-                                        onAssignSpool={supportsSpoolAssignment ? () => setAssignSpoolModal({
+                                        onAssignSpool={supportsSpoolAssignment && !isSnapmakerU1Unit ? () => setAssignSpoolModal({
                                           printerId: printer.id,
                                           amsId: ams.id,
                                           trayId: slotIdx,

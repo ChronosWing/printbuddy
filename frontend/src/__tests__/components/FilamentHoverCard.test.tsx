@@ -30,6 +30,24 @@ describe('FilamentHoverCard', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
   });
 
+  it('labels a U1 physical spool separately from its synthetic toolhead ID', async () => {
+    renderWithHover(
+      <FilamentHoverCard
+        data={{ ...baseFilamentData, firmwareManagedSpool: true, physicalSpoolId: 38, trayUuid: 'snapmaker-u1-e0' }}
+        spoolman={{ enabled: true, linkedSpoolId: 38 }}
+      >
+        <div>trigger</div>
+      </FilamentHoverCard>
+    );
+    vi.advanceTimersByTime(100);
+    await waitFor(() => expect(screen.getByText('Physical Spool ID')).toBeInTheDocument());
+    expect(screen.getByText('#38')).toBeInTheDocument();
+    expect(screen.getByText('Toolhead ID')).toBeInTheDocument();
+    expect(screen.getByText(/Managed by U1 firmware/)).toBeInTheDocument();
+    expect(screen.queryByText('ASSIGNED')).not.toBeInTheDocument();
+    expect(screen.queryByText('Assign Spool')).not.toBeInTheDocument();
+  });
+
   it('shows native manufacturer, name and zero grams without a known capacity', async () => {
     renderWithHover(
       <FilamentHoverCard data={{ ...baseFilamentData, vendor: 'SnapSpeed', profile: 'Matte Black', fillLevel: null, remainingWeightGrams: 0 }}>

@@ -85,6 +85,27 @@ async def test_printer_status_broadcasts_when_cfs_remain_changes():
     assert send_status.await_count == 2
 
 
+@pytest.mark.asyncio
+async def test_u1_native_sync_runs_from_status_even_when_broadcast_is_unchanged():
+    state = _state_with_cfs_remain(100)
+    state.raw_data["ams"][0]["module_type"] = "snapmaker_u1"
+    with (
+        patch.object(main, "_sync_u1_native_locations_from_status", new_callable=AsyncMock) as sync,
+        patch.object(main, "mqtt_relay") as mqtt_relay,
+        patch.object(main, "printer_manager") as printer_manager,
+        patch.object(main, "notification_service"),
+        patch.object(main, "smart_plug_manager"),
+        patch.object(main.ws_manager, "send_printer_status", new_callable=AsyncMock),
+        patch.object(main, "printer_state_to_dict", return_value={"connected": True}),
+    ):
+        mqtt_relay.on_printer_status = AsyncMock()
+        printer_manager.get_printer.return_value = None
+        printer_manager.get_model.return_value = "Snapmaker U1"
+        await main.on_printer_status_change(4243, state)
+        await main.on_printer_status_change(4243, state)
+    assert sync.await_count == 2
+
+
 def _printing_state(*, progress: float, layer_num: int, total_layers: int, connected: bool = True):
     return SimpleNamespace(
         connected=connected,

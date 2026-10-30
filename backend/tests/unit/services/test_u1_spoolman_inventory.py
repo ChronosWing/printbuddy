@@ -64,12 +64,29 @@ def test_four_authoritative_ids_weight_colors_and_read_only_requests(setup_u1):
     assert [t["tray_type"] for t in trays(client)] == ["PLA"] * 4
     assert [t["remain"] for t in trays(client)] == [94, 60, 25, 0]
     assert all(t["native_spoolman"] for t in trays(client))
+    assert client.state.raw_data["ams"][0]["native_spoolman_snapshot_complete"] is True
     assert trays(client)[2]["loaded_to_extruder"] is True
     assert {call.args[1]["path"] for call in post.call_args_list} == {f"/v1/spool/{i}" for i in IDS}
     assert all(
         call.args[0] == "server/spoolman/proxy" and call.args[1]["request_method"] == "GET"
         for call in post.call_args_list
     )
+
+
+@pytest.mark.parametrize("reported", [[38, 36, 31], [38, None, 31, 27], [38, "bad", 31, 27], [38, True, 31, 27]])
+def test_missing_or_malformed_native_ids_do_not_mark_snapshot_complete(setup_u1, reported):
+    client, status, _, _ = setup_u1
+    status["print_task_config"]["filament_spool_id"] = reported
+    client._apply_snapmaker_u1_status(status)
+    assert client.state.raw_data["ams"][0]["native_spoolman_snapshot_complete"] is False
+
+
+def test_explicit_zero_is_a_complete_empty_native_slot(setup_u1):
+    client, status, _, _ = setup_u1
+    status["print_task_config"]["filament_spool_id"] = [38, 0, 31, 27]
+    client._apply_snapmaker_u1_status(status)
+    assert client.state.raw_data["ams"][0]["native_spoolman_snapshot_complete"] is True
+    assert trays(client)[1]["spoolman_spool_id"] is None
 
 
 def test_cache_refresh_and_assignment_change_do_not_reuse_old_weight(setup_u1):

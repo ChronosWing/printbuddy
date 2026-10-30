@@ -328,7 +328,7 @@ describe('PrintersPage', () => {
       expect(within(filamentSection).queryByText('In extruder')).toBeNull();
     });
 
-    it('lets Snapmaker U1 users assign a Spoolman spool from a spool slot menu', async () => {
+    it('does not offer PrintBuddy spool assignment for firmware-managed U1 slots', async () => {
       const user = userEvent.setup();
       server.use(
         http.get('/api/v1/printers/', () => HttpResponse.json([{
@@ -363,7 +363,7 @@ describe('PrintersPage', () => {
       const card = await screen.findByTestId('printer-card-7');
       const filamentSection = await within(card).findByTestId('printer-card-section-filaments');
       await user.click(within(filamentSection).getAllByTitle('Slot options')[0]);
-      expect(await within(filamentSection).findByText('Assign')).not.toBeNull();
+      expect(within(filamentSection).queryByText('Assign')).toBeNull();
     });
 
     it('lets Moonraker users set reported fan speeds from the status strip', async () => {

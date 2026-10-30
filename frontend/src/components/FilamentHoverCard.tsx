@@ -15,6 +15,8 @@ interface FilamentData {
   kFactor: string;
   fillLevel: number | null; // null = unknown
   trayUuid?: string | null; // Bambu Lab spool UUID for Spoolman linking
+  firmwareManagedSpool?: boolean;
+  physicalSpoolId?: number | null;
   tagUid?: string | null; // Generic NFC tag UID fallback for linking
   fillSource?: 'ams' | 'spoolman' | 'inventory'; // Source of fill level data
 }
@@ -295,10 +297,16 @@ export function FilamentHoverCard({ data, children, disabled, className = '', sp
               {/* Spoolman section - only show if enabled */}
               {spoolman?.enabled && (
                 <div className="pt-2 mt-2 border-t border-bambu-dark-tertiary space-y-2">
+                  {data.firmwareManagedSpool && (
+                    <>
+                      <div className="text-[10px] text-bambu-gray-light">Managed by U1 firmware · change assignments in the U1 Filament Manager</div>
+                      <div className="flex items-center justify-between text-[10px]"><span className="uppercase tracking-wider text-bambu-gray">Physical Spool ID</span><span className="font-mono text-white">{data.physicalSpoolId ? `#${data.physicalSpoolId}` : 'Unassigned'}</span></div>
+                    </>
+                  )}
                   {/* Tray UUID with copy button */}
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] uppercase tracking-wider text-bambu-gray font-medium">
-                      {t('spoolman.spoolId')}
+                      {data.firmwareManagedSpool ? 'Toolhead ID' : t('spoolman.spoolId')}
                     </span>
                     {data.trayUuid ? (
                       <button
@@ -307,7 +315,7 @@ export function FilamentHoverCard({ data, children, disabled, className = '', sp
                           handleCopyUuid();
                         }}
                         className="flex items-center gap-1 text-xs text-bambu-gray hover:text-white transition-colors"
-                        title="Copy spool UUID"
+                        title={data.firmwareManagedSpool ? 'Copy toolhead ID' : 'Copy spool UUID'}
                       >
                         <span className="font-mono text-[10px] truncate max-w-[80px]">
                           {data.trayUuid.slice(0, 8)}...

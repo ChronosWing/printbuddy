@@ -1,5 +1,6 @@
 """Location synchronization follows committed slot bindings, never weight state."""
 
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -9,6 +10,18 @@ from backend.app.models.printer import Printer
 from backend.app.models.spoolman_slot_assignment import SpoolmanSlotAssignment
 from backend.app.services.spoolman import SpoolmanClient
 from backend.app.services.spoolman_location_sync import reconcile_spool_locations, sync_native_spool_slots
+
+
+def u1_snapshot(spool_ids, *, complete=True):
+    return [{
+        "id": 0,
+        "module_type": "snapmaker_u1",
+        "native_spoolman_snapshot_complete": complete,
+        "tray": [
+            {"id": index, "native_spoolman": spool_id is not None, "spoolman_spool_id": spool_id}
+            for index, spool_id in enumerate(spool_ids)
+        ],
+    }]
 
 
 @pytest.mark.asyncio
@@ -286,6 +299,85 @@ async def test_native_snapshot_replaces_then_clears_only_after_complete_status(d
         status.connected = True
         status.raw_data = {"ams": snapshot(None)}
         await sync_native_spool_slots(db_session, spoolman, 1, snapshot(None))
+    spoolman.set_spool_location.assert_awaited_once_with(42, None)
+
+
+@pytest.mark.asyncio
+async def test_u1_status_path_discovers_replaces_and_reconnects_native_spools(db_session):
+    from sqlalchemy import text
+
+    from backend.app import main
+
+    await add_printer(db_session, 1, "U1", provider="klipper")
+    spoolman = client(None)
+    locations = {42: None, 43: None}
+
+    async def get_spool(spool_id):
+        return {"id": spool_id, "location": locations[spool_id]}
+
+    async def set_location(spool_id, location):
+        locations[spool_id] = location
+
+    spoolman.get_spool.side_effect = get_spool
+    spoolman.set_spool_location.side_effect = set_location
+    state = SimpleNamespace(connected=True, raw_data={"ams": u1_snapshot([42, None, None, None])})
+
+    @asynccontextmanager
+    async def session():
+        yield db_session
+
+    with (
+        patch.object(main, "async_session", session),
+        patch.object(main, "get_spoolman_client", AsyncMock(return_value=spoolman)),
+        patch("backend.app.services.spoolman_location_sync.printer_manager.get_status", return_value=state),
+    ):
+        await main._sync_u1_native_locations_from_status(1, state)
+        assert locations[42] == "U1"
+        assert spoolman.set_spool_location.await_count == 1
+        with patch("backend.app.services.spoolman_location_sync.reconcile_spool_locations", new_callable=AsyncMock) as reconcile:
+            await main._sync_u1_native_locations_from_status(1, state)
+            reconcile.assert_not_awaited()
+        assert spoolman.set_spool_location.await_count == 1
+        state.raw_data = {"ams": u1_snapshot([43, None, None, None])}
+        await main._sync_u1_native_locations_from_status(1, state)
+        assert locations == {42: None, 43: "U1"}
+        assert (await db_session.execute(text("SELECT spool_id FROM spoolman_native_slots"))).scalars().all() == [43]
+        state.connected = False
+        state.raw_data = {"ams": u1_snapshot([None, None, None, None])}
+        await main._sync_u1_native_locations_from_status(1, state)
+        assert locations[43] == "U1"
+        state.connected = True
+        state.raw_data = {"ams": u1_snapshot([43, None, None, None])}
+        await main._sync_u1_native_locations_from_status(1, state)
+        assert locations[43] == "U1"
+        assert spoolman.set_spool_location.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_u1_incomplete_or_malformed_native_snapshot_cannot_clear(db_session):
+    from sqlalchemy import text
+
+    await add_printer(db_session, 1, "U1", provider="klipper")
+    spoolman = client(None)
+    state = SimpleNamespace(connected=True, raw_data={"ams": u1_snapshot([42, None, None, None])})
+    with patch("backend.app.services.spoolman_location_sync.printer_manager.get_status", return_value=state):
+        await sync_native_spool_slots(db_session, spoolman, 1, state.raw_data["ams"])
+        spoolman.set_spool_location.reset_mock()
+        for bad in (
+            u1_snapshot([None, None, None, None], complete=False),
+            u1_snapshot([None, None, None]),
+            u1_snapshot([None, None, None, None]),
+        ):
+            if bad[0]["native_spoolman_snapshot_complete"]:
+                bad[0]["tray"][1]["spoolman_spool_id"] = "unknown"
+            state.raw_data = {"ams": bad}
+            await sync_native_spool_slots(db_session, spoolman, 1, bad)
+        assert (await db_session.execute(text("SELECT spool_id FROM spoolman_native_slots"))).scalars().all() == [42]
+        spoolman.set_spool_location.assert_not_awaited()
+        state.raw_data = {"ams": u1_snapshot([None, None, None, None])}
+        spoolman.get_spool.return_value = {"id": 42, "location": "U1"}
+        await sync_native_spool_slots(db_session, spoolman, 1, state.raw_data["ams"])
+        assert (await db_session.execute(text("SELECT count(*) FROM spoolman_native_slots"))).scalar_one() == 0
     spoolman.set_spool_location.assert_awaited_once_with(42, None)
 
 

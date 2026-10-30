@@ -365,6 +365,14 @@ def _snapmaker_u1_spool_id(value: Any) -> int | None:
     return spool_id if spool_id > 0 else None
 
 
+def _snapmaker_u1_spool_id_reported(value: Any) -> bool:
+    """A reported zero means empty; absent or malformed data is unknown."""
+    return not isinstance(value, bool) and (
+        isinstance(value, int) and value >= 0
+        or isinstance(value, str) and bool(re.fullmatch(r"[0-9]+", value))
+    )
+
+
 def _snapmaker_u1_task_filament_metadata(config: dict[str, Any], index: int) -> dict[str, Any]:
     """Extract real U1 slot metadata from print_task_config arrays.
 
@@ -1329,6 +1337,7 @@ class MoonrakerPrinterClient:
         self.state.active_extruder = active_index if active_index is not None else -1
 
         task_config = status.get("print_task_config") if isinstance(status.get("print_task_config"), dict) else {}
+        reported_spool_ids = task_config.get("filament_spool_id")
         feed_slots: dict[int, dict[str, Any]] = {}
         for module_name in ("filament_feed left", "filament_feed right"):
             module = status.get(module_name)
@@ -1434,6 +1443,12 @@ class MoonrakerPrinterClient:
                     "name": "Snapmaker U1 Feeders",
                     "tray": trays,
                     "module_type": "snapmaker_u1",
+                    "native_spoolman_snapshot_complete": (
+                        set(feed_slots) == set(range(4))
+                        and isinstance(reported_spool_ids, list)
+                        and len(reported_spool_ids) == 4
+                        and all(_snapmaker_u1_spool_id_reported(value) for value in reported_spool_ids)
+                    ),
                 }
             ]
             self.state.raw_data["snapmaker_u1"] = {
