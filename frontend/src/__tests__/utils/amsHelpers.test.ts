@@ -144,6 +144,30 @@ function status(overrides: Partial<PrinterStatus>): PrinterStatus {
 const printer = { id: 7, name: 'P1S', serial_number: 'P1S123' } as Printer;
 
 describe('resolveLoadedFilamentInfo', () => {
+  it.each([
+    { moduleType: 'ams', printerName: 'P1S', subtype: 'Basic Red', color: 'Red', expected: 'Bambu Lab PLA Basic Red' },
+    { moduleType: 'snapmaker_u1', printerName: 'U1', subtype: 'Matte Foggy Purple', color: 'Matte Foggy Purple', expected: 'Panchroma PLA Matte Foggy Purple' },
+  ])('keeps the physical spool identity and weight for $printerName', ({ moduleType, printerName, subtype, color, expected }) => {
+    const physical = spool({ id: 42, brand: printerName === 'U1' ? 'Panchroma' : 'Bambu Lab', subtype, color_name: color, label_weight: 1000, weight_used: 750 });
+    const result = resolveLoadedFilamentInfo({
+      printer: { ...printer, name: printerName },
+      status: status({ tray_now: 2, ams: [ams({ id: 0, module_type: moduleType, tray: [tray({ id: 2, tray_type: 'PLA', spoolman_spool_id: 42, tray_color: 'FF0000', active: true })] })] }),
+      spoolmanSpools: [physical],
+      spoolmanSlotAssignments: [{ printer_id: 7, printer_name: printerName, ams_id: 0, tray_id: 2, spoolman_spool_id: 42, ams_label: moduleType }],
+    });
+    expect(result).toMatchObject({ material: expected, remainingPct: 25, source: 'spoolman', spool: { id: 42, weight_used: 750 } });
+  });
+
+  it('does not invent a physical U1 spool when only toolhead telemetry exists', () => {
+    const result = resolveLoadedFilamentInfo({
+      printer: { ...printer, name: 'U1' },
+      status: status({ tray_now: 1, ams: [ams({ id: 0, module_type: 'snapmaker_u1', tray: [tray({ id: 1, tray_type: 'PLA', tray_color: '73518CFF', active: true })] })] }),
+      spoolmanSpools: [],
+      spoolmanSlotAssignments: [],
+    });
+    expect(result).toMatchObject({ source: 'telemetry', spool: null, material: 'PLA' });
+  });
+
   it('prefers the assigned Spoolman spool for the currently active AMS slot', () => {
     const sunluAbs = spool({ id: 42, brand: 'Sunlu', material: 'ABS', color_name: 'Black', rgba: '111111', label_weight: 1000, weight_used: 250 });
     const result = resolveLoadedFilamentInfo({

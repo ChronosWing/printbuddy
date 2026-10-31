@@ -5,6 +5,7 @@
  */
 import type { AMSTray, AMSUnit, InventorySpool, Printer, PrinterStatus, SpoolAssignment } from '../api/client';
 import { parseUTCDate } from './date';
+import { formatFilamentDescription } from './filamentDescription';
 
 /**
  * Normalize color format from various sources.
@@ -353,7 +354,7 @@ export interface ResolveLoadedFilamentInfoInput {
 }
 
 function spoolLabel(spool: InventorySpool): string {
-  return [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ');
+  return formatFilamentDescription(spool);
 }
 
 function spoolRemainingPct(spool: InventorySpool): number | null {

@@ -262,6 +262,43 @@ describe('PrintFarmMonitorPage', () => {
     expect(screen.getByRole('dialog', { name: 'Recent activity' })).toBeInTheDocument();
   });
 
+  it('shows the physical low-stock spool without repeating its color in alerts', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(http.get('/api/v1/inventory/spools', () => HttpResponse.json([{
+      id: 42, brand: 'Panchroma', material: 'PLA', subtype: 'Matte Foggy Purple',
+      color_name: 'Matte Foggy Purple', rgba: '73518C', extra_colors: null,
+      label_weight: 1000, weight_used: 900, archived_at: null,
+      storage_location: 'U1', low_stock_threshold_pct: 20,
+    }])));
+    render(<PrintFarmMonitorPage />);
+    fireEvent.click(await screen.findByRole('button', { name: /alerts/i }));
+    const alerts = screen.getByRole('dialog', { name: 'Farm alerts' });
+    expect(alerts).toHaveTextContent('Panchroma PLA Matte Foggy Purple');
+    expect(alerts).not.toHaveTextContent('Matte Foggy Purple Matte Foggy Purple');
+    expect(alerts).toHaveTextContent('10%');
+  });
+
+  it('shows the U1 physical spool once in the compact detail view', async () => {
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));
+    server.use(
+      http.get('/api/v1/printers/', () => HttpResponse.json([{ ...printers[0], name: 'Fixture U1', provider: 'moonraker', model: 'Snapmaker U1' }])),
+      http.get('/api/v1/printers/:id/status', () => HttpResponse.json({ ...statusFor(1), name: 'Fixture U1', tray_now: 1, ams: [{ id: 0, name: 'U1 toolheads', module_type: 'snapmaker_u1', tray: [{ id: 1, tray_type: 'PLA', tray_color: '73518CFF', spoolman_spool_id: 202, active: true }] }] })),
+      http.get('/api/v1/settings/spoolman', () => HttpResponse.json({ spoolman_enabled: 'true', spoolman_url: 'http://fixture.invalid' })),
+      http.get('/api/v1/spoolman/inventory/spools', () => HttpResponse.json([{ id: 202, brand: 'Panchroma', material: 'PLA', subtype: 'Matte Foggy Purple', color_name: 'Matte Foggy Purple', color_name_is_synthesized: true, rgba: '73518CFF', label_weight: 1000, weight_used: 940, archived_at: null }])),
+      http.get('/api/v1/spoolman/inventory/slot-assignments/all', () => HttpResponse.json([{ printer_id: 1, ams_id: 0, tray_id: 1, spoolman_spool_id: 202 }])),
+    );
+    render(<PrintFarmMonitorPage />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Details for Fixture U1' }));
+    const detail = screen.getByRole('dialog', { name: 'Fixture U1 details' });
+    expect(detail).toHaveTextContent('Panchroma PLA Matte Foggy Purple');
+    expect(detail).not.toHaveTextContent('Matte Foggy Purple Matte Foggy Purple');
+    expect(detail).toHaveTextContent('Spool #202');
+    expect(detail).toHaveTextContent('60 g');
+    expect(detail).toHaveTextContent('6%');
+  });
+
   it('makes every printer reachable in compact TV mode without a fixed eight-printer limit', async () => {
     Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 });
     vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() })));

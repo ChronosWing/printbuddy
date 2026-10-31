@@ -33,6 +33,7 @@ import {
   type SpoolAssignment,
 } from '../api/client';
 import { getPrinterImage } from '../utils/printer';
+import { formatFilamentDescription } from '../utils/filamentDescription';
 import { classifyPrinterStatus } from '../utils/printerStatus';
 import { appAssetPath } from '../utils/assetPaths';
 import { getGlobalTrayId, resolveLoadedFilamentInfo, type ResolvedLoadedFilamentInfo, type SpoolmanSlotAssignmentLike } from '../utils/amsHelpers';
@@ -173,7 +174,7 @@ function getJobName(item: MonitorPrinter): string | null {
 }
 
 function spoolLabel(spool: InventorySpool): string {
-  return [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ');
+  return formatFilamentDescription(spool);
 }
 
 function spoolRemainingPct(spool: InventorySpool): number | null {
@@ -229,7 +230,7 @@ function getMaintenanceAlerts(overview: PrinterMaintenanceOverview[]): MonitorAl
       detail: printer.printer_name,
       sub: item.maintenance_type_name,
       meta: formatMaintenanceMeta(item),
-      tone: item.is_due ? 'text-yellow-300' : 'text-amber-300',
+      tone: item.is_due ? 'text-yellow-800 dark:text-yellow-300' : 'text-amber-800 dark:text-amber-300',
     }));
 }
 
@@ -263,7 +264,7 @@ function getPrinterAlerts(items: MonitorPrinter[]): MonitorAlert[] {
         detail: item.printer.name,
         sub: getJobName(item) || 'Paused by printer state',
         meta: formatDuration(item.status?.remaining_time),
-        tone: 'text-amber-300',
+        tone: 'text-amber-800 dark:text-amber-300',
       }];
     }
     if (state === 'stopped') {
@@ -273,7 +274,7 @@ function getPrinterAlerts(items: MonitorPrinter[]): MonitorAlert[] {
         detail: item.printer.name,
         sub: getJobName(item) || 'Stopped by printer state',
         meta: 'stopped',
-        tone: 'text-orange-300',
+        tone: 'text-orange-800 dark:text-orange-300',
       }];
     }
     if (state === 'error' || (item.status?.hms_errors?.length ?? 0) > 0) {
@@ -434,7 +435,7 @@ function getCompactFilaments(item: MonitorPrinter, loadedFilament: ResolvedLoade
     const initialGrams = spool?.label_weight ?? tray.initial_weight;
     return [{
       slot: `${unit.name || (unit.id === 0 ? 'Slots' : `Unit ${unit.id}`)} · ${tray.id + 1}`,
-      name: spool ? [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ') : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '),
+      name: spool ? spoolLabel(spool) : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '),
       color: spool?.rgba ?? tray.tray_color,
       remainingGrams,
       remainingPct: initialGrams && initialGrams > 0 && remainingGrams !== null ? Math.round(remainingGrams / initialGrams * 100) : tray.remain >= 0 ? tray.remain : null,
@@ -452,7 +453,7 @@ function getCompactFilaments(item: MonitorPrinter, loadedFilament: ResolvedLoade
     const spool = spoolmanSpools.find((candidate) => candidate.id === assignedId) ?? localAssignments.find((assignment) => assignment.printer_id === item.printer.id && assignment.ams_id === 255 && assignment.tray_id === tray.id - 254)?.spool;
     const remainingGrams = spool ? Math.max(0, spool.label_weight - spool.weight_used) : tray.remaining_weight ?? null;
     const initialGrams = spool?.label_weight ?? tray.initial_weight;
-    filaments.push({ slot: 'External spool', name: spool ? [spool.brand, spool.material, spool.subtype, spool.color_name].filter(Boolean).join(' ') : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '), color: spool?.rgba ?? tray.tray_color, remainingGrams, remainingPct: initialGrams && initialGrams > 0 && remainingGrams !== null ? Math.round(remainingGrams / initialGrams * 100) : tray.remain >= 0 ? tray.remain : null, spoolId: spool?.id ?? assignedId ?? null, active: item.status?.connected === true && item.status.tray_now === tray.id, manufacturer: spool?.brand ?? tray.spoolman_vendor ?? null, material: spool?.material ?? tray.tray_type, filamentName: spool?.subtype ?? tray.spoolman_filament_name ?? tray.tray_sub_brands ?? null, colorName: spool?.color_name ?? null });
+    filaments.push({ slot: 'External spool', name: spool ? spoolLabel(spool) : [tray.spoolman_vendor, tray.spoolman_filament_name || tray.tray_type].filter(Boolean).join(' '), color: spool?.rgba ?? tray.tray_color, remainingGrams, remainingPct: initialGrams && initialGrams > 0 && remainingGrams !== null ? Math.round(remainingGrams / initialGrams * 100) : tray.remain >= 0 ? tray.remain : null, spoolId: spool?.id ?? assignedId ?? null, active: item.status?.connected === true && item.status.tray_now === tray.id, manufacturer: spool?.brand ?? tray.spoolman_vendor ?? null, material: spool?.material ?? tray.tray_type, filamentName: spool?.subtype ?? tray.spoolman_filament_name ?? tray.tray_sub_brands ?? null, colorName: spool?.color_name ?? null });
   }
   if (filaments.length || !loadedFilament) return filaments;
   return [{ slot: loadedFilament.detail, name: loadedFilament.material, color: loadedFilament.color ?? null, remainingGrams: loadedFilament.spool ? Math.max(0, loadedFilament.spool.label_weight - loadedFilament.spool.weight_used) : null, remainingPct: loadedFilament.remainingPct ?? null, spoolId: loadedFilament.spool?.id ?? null, active: item.status?.connected === true && (loadedFilament.globalTrayId === item.status.tray_now || loadedFilament.tray?.active === true), manufacturer: loadedFilament.spool?.brand ?? null, material: loadedFilament.spool?.material ?? loadedFilament.tray?.tray_type ?? null, filamentName: loadedFilament.spool?.subtype ?? loadedFilament.tray?.spoolman_filament_name ?? null, colorName: loadedFilament.spool?.color_name ?? null }];
@@ -526,7 +527,7 @@ function CompactPrinterDetail({ item, filaments, theme, onClose }: { item: Monit
         {(warnings.length > 0 || status?.door_open || status?.connected === false) && <section className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2" aria-label="Printer warnings"><h3 className="flex items-center gap-2 text-sm font-bold text-amber-300"><AlertTriangle className="h-4 w-4" />Warnings</h3><div className="mt-1 flex flex-wrap gap-2 text-xs text-amber-200">{status?.connected === false && <span>Printer disconnected</span>}{status?.door_open && <span>Door open</span>}{warnings.map((warning, index) => <span key={`${warning.code}-${index}`}>Printer alert {warning.code} · severity {warning.severity}</span>)}</div></section>}
         {activePrint && <section className={`rounded-lg border p-3 ${theme.panelSoft}`} aria-label="Current print"><h3 className={`mb-1 flex items-center gap-2 text-xs font-bold uppercase ${theme.muted}`}><PrinterIcon className="h-4 w-4" />Current print</h3><div className={`break-words text-sm font-semibold [overflow-wrap:anywhere] ${theme.text}`}>{getJobName(item) || 'Active print'}</div><div className="mt-2 flex items-center justify-between text-sm"><span className={theme.muted}>Progress</span><strong>{progress === null ? '—' : `${progress}%`}</strong></div><div className="mt-1 h-2 overflow-hidden rounded-full bg-bambu-dark-tertiary"><div className="h-full rounded-full bg-gradient-to-r from-bambu-green-light to-bambu-green" style={{ width: `${progress ?? 0}%` }} /></div><div className={`mt-2 flex flex-wrap gap-x-5 gap-y-1 text-xs ${theme.muted}`}><span className="flex items-center gap-1"><Clock3 className="h-4 w-4" />ETA {formatEta(status?.remaining_time)}</span><span>{formatDuration(status?.remaining_time)} remaining</span>{(status?.layer_num != null || status?.total_layers != null) && <span className="flex items-center gap-1"><Layers className="h-4 w-4" />Layer {status?.layer_num ?? '—'} / {status?.total_layers ?? '—'}</span>}</div></section>}
         {temperatureRows.length > 0 && <section aria-label="Temperatures"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><Thermometer className="h-4 w-4" />Temperatures</h3><div className="grid grid-cols-1 gap-2 sm:grid-cols-3">{temperatureRows.map((row) => <div key={row.label} className={`flex items-center gap-2 rounded-lg border px-3 py-2 ${theme.panelSoft}`}><Thermometer className={`h-5 w-5 ${row.color}`} /><div><div className={`text-xs ${theme.muted}`}>{row.label}</div><div className={`text-sm font-bold ${theme.text}`}>{row.current == null ? '—' : `${Math.round(row.current)}°C`}{row.target != null && <span className={`ml-1 text-xs font-normal ${theme.muted}`}>/ {Math.round(row.target)}°C target</span>}</div></div></div>)}</div></section>}
-        {filaments.length > 0 && <section aria-label="Loaded filament slots"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><PackageOpen className="h-4 w-4" />Loaded filament slots · {filaments.length}</h3><div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filaments.map((filament, index) => <div key={`${filament.slot}-${index}`} className={`flex min-w-0 items-center gap-2 rounded-lg border p-2 ${theme.panelSoft}`}><span className={`h-10 w-10 shrink-0 rounded-lg border ${theme.divider}`} style={{ backgroundColor: normalizeSpoolColor(filament.color) || 'var(--bg-tertiary)' }} /><div className="min-w-0 flex-1"><div className={`flex flex-wrap items-center gap-1 text-xs font-semibold ${theme.text}`}>{filament.slot}{filament.active && <span className="rounded bg-bambu-green/20 px-1.5 py-0.5 text-[0.65rem] text-bambu-green-light">ACTIVE</span>}</div><div className={`break-words text-xs [overflow-wrap:anywhere] ${theme.text}`}>{[filament.manufacturer, filament.material, filament.filamentName, filament.colorName].filter(Boolean).join(' · ') || filament.name}</div>{filament.spoolId != null && <div className={`text-[0.65rem] ${theme.muted}`}>Spool #{filament.spoolId}</div>}</div><div className={`shrink-0 text-right text-xs font-bold ${theme.text}`}>{filament.remainingGrams === null ? '—' : `${Math.round(filament.remainingGrams)} g`}<div className={theme.muted}>{filament.remainingPct === null ? '—' : `${filament.remainingPct}%`}</div></div></div>)}</div></section>}
+        {filaments.length > 0 && <section aria-label="Loaded filament slots"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><PackageOpen className="h-4 w-4" />Loaded filament slots · {filaments.length}</h3><div className="grid grid-cols-1 gap-2 sm:grid-cols-2">{filaments.map((filament, index) => <div key={`${filament.slot}-${index}`} className={`flex min-w-0 items-center gap-2 rounded-lg border p-2 ${theme.panelSoft}`}><span className={`h-10 w-10 shrink-0 rounded-lg border ${theme.divider}`} style={{ backgroundColor: normalizeSpoolColor(filament.color) || 'var(--bg-tertiary)' }} /><div className="min-w-0 flex-1"><div className={`flex flex-wrap items-center gap-1 text-xs font-semibold ${theme.text}`}>{filament.slot}{filament.active && <span className="rounded bg-bambu-green/20 px-1.5 py-0.5 text-[0.65rem] text-bambu-green-light">ACTIVE</span>}</div><div className={`break-words text-xs [overflow-wrap:anywhere] ${theme.text}`}>{filament.name}</div>{filament.spoolId != null && <div className={`text-[0.65rem] ${theme.muted}`}>Spool #{filament.spoolId}</div>}</div><div className={`shrink-0 text-right text-xs font-bold ${theme.text}`}>{filament.remainingGrams === null ? '—' : `${Math.round(filament.remainingGrams)} g`}<div className={theme.muted}>{filament.remainingPct === null ? '—' : `${filament.remainingPct}%`}</div></div></div>)}</div></section>}
         {extraStatus.length > 0 && <section aria-label="Additional status"><h3 className={`mb-2 flex items-center gap-2 text-sm font-bold ${theme.text}`}><Server className="h-4 w-4" />Additional status</h3><div className={`flex flex-wrap gap-2 text-xs ${theme.muted}`}>{extraStatus.map((detail) => <span key={detail} className={`rounded-lg border px-2 py-1.5 ${theme.panelSoft}`}>{detail}</span>)}</div></section>}
       </div>
     </div>
