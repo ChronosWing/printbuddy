@@ -1794,6 +1794,22 @@ class MoonrakerPrinterClient:
             self.request_status_update()
         return True
 
+    def supports_u1_spool_assignment(self) -> bool:
+        """Check the firmware command before offering native assignment."""
+        if not self._is_snapmaker_u1() or not self.state.connected:
+            return False
+        try:
+            return "SET_SPOOL_ID" in self._available_macro_names()
+        except Exception:
+            return False
+
+    def assign_u1_spool(self, channel: int, spool_id: int) -> bool:
+        """Issue one native assignment; caller must verify a fresh status sample."""
+        if not self.supports_u1_spool_assignment() or channel not in range(4) or spool_id <= 0:
+            return False
+        self._post("printer/gcode/script", {"script": f"SET_SPOOL_ID LANE=E{channel} SPOOL_ID={spool_id}"})
+        return True
+
     def set_nozzle_temperature(self, target: int | float) -> bool:
         return self.send_gcode(f"M104 S{int(target)}")
 

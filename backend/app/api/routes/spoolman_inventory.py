@@ -68,6 +68,10 @@ SPOOLMAN_DUAL_EXTERNAL_TRAY_IDS = {0, 1}
 
 router = APIRouter(prefix="/spoolman/inventory", tags=["spoolman-inventory"])
 
+# Serializes the new confirmed workflow without changing legacy assignment calls.
+_confirmed_slot_locks: dict[tuple[int, int, int], asyncio.Lock] = {}
+_confirmed_spool_locks: dict[int, asyncio.Lock] = {}
+
 
 # Cache the last successful health-check timestamp to avoid a round-trip on
 # every request.  A failed check clears the cache immediately.
@@ -1264,11 +1268,12 @@ async def sync_spoolman_ams_weights(
     return {"synced": synced, "skipped": skipped}
 
 
-@router.post("/slot-assignments")
-async def assign_spoolman_slot(
+async def _assign_spoolman_slot_impl(
     body: SpoolSlotAssignmentRequest,
     db: AsyncSession = Depends(get_db),
     _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_UPDATE),
+    *,
+    include_sync_result: bool = False,
 ) -> dict:
     """Assign a Spoolman spool to a printer AMS slot (stored in local DB only).
 
@@ -1313,6 +1318,7 @@ async def assign_spoolman_slot(
 
     # Spool confirmed in Spoolman — upsert into local slot-assignment table
     # assigned_at is intentionally not refreshed on re-assign (original timestamp preserved)
+    printer_side_status = "unavailable"
     try:
         await db.execute(
             text(
@@ -1475,7 +1481,7 @@ async def assign_spoolman_slot(
                     "printer" if printer_kp else "stored",
                 )
 
-            mqtt_client.ams_set_filament_setting(
+            metadata_sent = mqtt_client.ams_set_filament_setting(
                 ams_id=body.ams_id,
                 tray_id=body.tray_id,
                 tray_info_idx=effective_tray_info_idx,
@@ -1486,6 +1492,7 @@ async def assign_spoolman_slot(
                 nozzle_temp_max=temp_max,
                 setting_id=effective_setting_id,
             )
+            printer_side_status = "transmitted" if metadata_sent else "failed"
 
             if matching_kp and matching_kp.cali_idx is not None:
                 # Use printer-reported filament_id when available, otherwise
@@ -1494,13 +1501,15 @@ async def assign_spoolman_slot(
                 cali_filament_id = (
                     printer_kp.filament_id if printer_kp and printer_kp.filament_id else None
                 ) or effective_tray_info_idx
-                mqtt_client.extrusion_cali_sel(
+                calibration_sent = mqtt_client.extrusion_cali_sel(
                     ams_id=body.ams_id,
                     tray_id=body.tray_id,
                     cali_idx=matching_kp.cali_idx,
                     filament_id=cali_filament_id,
                     nozzle_diameter=nozzle_diameter,
                 )
+                if not calibration_sent:
+                    printer_side_status = "failed"
                 logger.info(
                     "Spoolman assign: applied K-profile cali_idx=%d "
                     "(kp_id=%d, filament_id=%s) for spool %d on printer %d AMS%d-T%d",
@@ -1517,13 +1526,15 @@ async def assign_spoolman_slot(
                 # Default K (cali_idx=-1). The live cali_idx belongs to whatever
                 # filament was there before, so preserving it would apply the
                 # wrong filament's calibration to the new spool.
-                mqtt_client.extrusion_cali_sel(
+                calibration_sent = mqtt_client.extrusion_cali_sel(
                     ams_id=body.ams_id,
                     tray_id=body.tray_id,
                     cali_idx=-1,
                     filament_id=effective_tray_info_idx,
                     nozzle_diameter=nozzle_diameter,
                 )
+                if not calibration_sent:
+                    printer_side_status = "failed"
                 logger.info(
                     "No stored K-profile for Spoolman spool %d — reset slot to Default K (cali_idx=-1)",
                     body.spoolman_spool_id,
@@ -1537,6 +1548,7 @@ async def assign_spoolman_slot(
                 body.printer_id,
             )
     except Exception:
+        printer_side_status = "failed"
         logger.exception(
             "Failed to auto-configure AMS slot for Spoolman spool %d (printer=%d, ams=%d, tray=%d)",
             body.spoolman_spool_id,
@@ -1545,7 +1557,227 @@ async def assign_spoolman_slot(
             body.tray_id,
         )
 
-    return mapped
+    return {"spool": mapped, "printer_side": printer_side_status} if include_sync_result else mapped
+
+
+@router.post("/slot-assignments")
+async def assign_spoolman_slot(
+    body: SpoolSlotAssignmentRequest,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_UPDATE),
+) -> dict:
+    """Preserve the existing API while serializing writes to each destination."""
+    slot_lock = _confirmed_slot_locks.setdefault((body.printer_id, body.ams_id, body.tray_id), asyncio.Lock())
+    async with slot_lock:
+        return await _assign_spoolman_slot_impl(body, db, user)
+
+
+class ConfirmedSpoolAssignment(BaseModel):
+    spoolman_spool_id: int = Field(gt=0)
+    printer_id: int = Field(gt=0)
+    ams_id: int = Field(ge=0)
+    tray_id: int = Field(ge=0)
+    expected_spool_id: int | None = Field(default=None, ge=1)
+    expected_slot_fingerprint: str
+    replacement_acknowledged: bool = False
+
+
+def _confirmed_slot(printer: Printer, state, client, ams_id: int, tray_id: int, local: dict) -> dict:
+    """Describe one reported destination; unknown occupancy fails closed."""
+    reason = None
+    physical_id = None
+    if not state or not state.connected:
+        reason = "Printer is disconnected or its status is stale"
+    elif state.state != "IDLE":
+        reason = f"Printer is {state.state or 'in an unknown state'}"
+    units = state.raw_data.get("ams") if state and isinstance(state.raw_data, dict) else None
+    unit = next((u for u in units if isinstance(u, dict) and _safe_int(u.get("id"), -1) == ams_id), None) if isinstance(units, list) else None
+    is_u1 = bool(unit and unit.get("module_type") == "snapmaker_u1")
+    if is_u1:
+        if unit.get("native_spoolman_snapshot_complete") is not True:
+            reason = "U1 toolhead snapshot is incomplete"
+        elif not client or not getattr(client, "supports_u1_spool_assignment", lambda: False)():
+            reason = "SET_SPOOL_ID is unavailable in the connected firmware"
+    elif printer.provider not in (None, "", "bambu"):
+        reason = "This printer has no verified assignment mechanism"
+    elif not client or not hasattr(client, "ams_set_filament_setting"):
+        reason = "Bambu printer control connection is unavailable"
+    trays = unit.get("tray") if unit else None
+    if ams_id == 255 and not is_u1 and state and isinstance(state.raw_data, dict):
+        trays = state.raw_data.get("vt_tray")
+        if isinstance(trays, dict):
+            trays = [trays]
+    reported_id = tray_id + 254 if ams_id == 255 else tray_id
+    tray = next((t for t in trays if isinstance(t, dict) and _safe_int(t.get("id"), -1) == reported_id), None) if isinstance(trays, list) else None
+    if not tray:
+        reason = "Slot is not present in the current printer report"
+    elif is_u1:
+        physical_id = tray.get("spoolman_spool_id")
+        if physical_id is not None and (type(physical_id) is not int or physical_id <= 0):
+            reason = "U1 reported an invalid physical spool ID"
+        elif physical_id is None and tray.get("filament_detected") is True:
+            reason = "Filament is loaded but its physical spool ID is unknown"
+    else:
+        physical_id = local.get((printer.id, ams_id, tray_id))
+        if physical_id is None and tray.get("state") not in (9, 10):
+            reason = "A physical spool may be loaded but its ID is unknown"
+        try:
+            _validate_spoolman_slot_shape(ams_id, tray_id)
+        except HTTPException:
+            reason = "This reported slot shape is not supported"
+    if is_u1 and (ams_id != 0 or tray_id not in range(4)):
+        reason = "Invalid U1 toolhead"
+    fingerprint = json.dumps(
+        [tray.get(key) for key in ("state", "tray_uuid", "tag_uid", "tray_color", "tray_type", "spoolman_spool_id", "filament_detected")]
+        if tray else [],
+        default=str,
+    )
+    return {
+        "ams_id": ams_id, "tray_id": tray_id,
+        "label": f"T{tray_id}" if is_u1 else f"External slot {tray_id}" if ams_id == 255 else f"AMS {ams_id} · slot {tray_id}",
+        "current_spool_id": physical_id,
+        "fingerprint": fingerprint,
+        "replacement_required": physical_id is not None,
+        "color": tray.get("tray_color") if tray else None,
+        "material": tray.get("tray_type") if tray else None,
+        "filament_name": tray.get("filament_name") if tray else None,
+        "available": reason is None, "reason": reason,
+        "mechanism": "u1_native" if is_u1 else "bambu" if printer.provider in (None, "", "bambu") else "unsupported",
+    }
+
+
+@router.get("/confirmed-assignments/preview")
+async def preview_confirmed_spool_assignment(
+    db: AsyncSession = Depends(get_db),
+    _: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_READ),
+) -> dict:
+    printers = list((await db.execute(select(Printer).where(Printer.is_active.is_(True)))).scalars().all())
+    bindings = list((await db.execute(select(SpoolmanSlotAssignment))).scalars().all())
+    local = {(b.printer_id, b.ams_id, b.tray_id): b.spoolman_spool_id for b in bindings}
+    result = []
+    for printer in printers:
+        state = printer_manager.get_status(printer.id)
+        client = printer_manager.get_client(printer.id)
+        units = state.raw_data.get("ams") if state and isinstance(state.raw_data, dict) else None
+        slots = []
+        if isinstance(units, list):
+            for unit in units:
+                if not isinstance(unit, dict) or _safe_int(unit.get("id"), -1) < 0:
+                    continue
+                for tray in unit.get("tray", []):
+                    if isinstance(tray, dict) and _safe_int(tray.get("id"), -1) >= 0:
+                        slots.append(_confirmed_slot(printer, state, client, _safe_int(unit["id"], -1), _safe_int(tray["id"], -1), local))
+        if printer.provider in (None, "", "bambu") and state and isinstance(state.raw_data, dict):
+            external = state.raw_data.get("vt_tray") or []
+            for tray in [external] if isinstance(external, dict) else external if isinstance(external, list) else []:
+                if isinstance(tray, dict) and _safe_int(tray.get("id"), -1) in (254, 255):
+                    slots.append(_confirmed_slot(printer, state, client, 255, _safe_int(tray["id"], -1) - 254, local))
+        result.append({"printer_id": printer.id, "name": printer.name, "slots": slots})
+    return {"printers": result}
+
+
+@router.post("/confirmed-assignments")
+async def confirm_spool_assignment(
+    body: ConfirmedSpoolAssignment,
+    db: AsyncSession = Depends(get_db),
+    user: User | None = RequirePermissionIfAuthEnabled(Permission.INVENTORY_UPDATE),
+) -> dict:
+    client = await _get_client(db)
+    async with _translate_spoolman_errors():
+        spool = await client.get_spool(body.spoolman_spool_id)
+    if spool.get("archived") or spool.get("archived_at"):
+        raise HTTPException(409, "Archived spools cannot be assigned")
+    slot_lock = _confirmed_slot_locks.setdefault((body.printer_id, body.ams_id, body.tray_id), asyncio.Lock())
+    spool_lock = _confirmed_spool_locks.setdefault(body.spoolman_spool_id, asyncio.Lock())
+    async with spool_lock, slot_lock:
+        printer = await db.get(Printer, body.printer_id)
+        if not printer or not printer.is_active:
+            raise HTTPException(404, "Printer not found")
+        location_enabled = printer.spoolman_location_sync_enabled
+        location_name = printer.spoolman_location
+        state = printer_manager.get_status(body.printer_id)
+        printer_client = printer_manager.get_client(body.printer_id)
+        local_rows = await db.execute(select(SpoolmanSlotAssignment).where(SpoolmanSlotAssignment.printer_id == body.printer_id))
+        local = {(row.printer_id, row.ams_id, row.tray_id): row.spoolman_spool_id for row in local_rows.scalars()}
+        slot = _confirmed_slot(printer, state, printer_client, body.ams_id, body.tray_id, local)
+        if not slot["available"]:
+            raise HTTPException(409, slot["reason"])
+        if slot["current_spool_id"] != body.expected_spool_id:
+            raise HTTPException(409, "Slot assignment changed; refresh the preview")
+        if slot["fingerprint"] != body.expected_slot_fingerprint:
+            raise HTTPException(409, "Printer slot changed; refresh the preview")
+        if slot["current_spool_id"] == body.spoolman_spool_id:
+            return {"outcome": "no_op", "printer_side": "unchanged", "printbuddy": "unchanged", "location": "unchanged"}
+        if slot["replacement_required"] and not body.replacement_acknowledged:
+            raise HTTPException(409, "Confirm that the previous spool has been physically removed")
+        other_local = await db.execute(
+            select(SpoolmanSlotAssignment.id).where(
+                SpoolmanSlotAssignment.spoolman_spool_id == body.spoolman_spool_id,
+                SpoolmanSlotAssignment.printer_id != body.printer_id,
+            )
+        )
+        other_native = await db.execute(
+            text("SELECT printer_id FROM spoolman_native_slots WHERE spool_id = :spool_id AND printer_id != :printer_id LIMIT 1"),
+            {"spool_id": body.spoolman_spool_id, "printer_id": body.printer_id},
+        )
+        if other_local.first() or other_native.first():
+            raise HTTPException(409, "This spool is still assigned to another printer")
+        if slot["mechanism"] == "u1_native":
+            try:
+                printer_client.assign_u1_spool(body.tray_id, body.spoolman_spool_id)
+            except Exception as exc:
+                logger.warning("U1 assignment command returned an error: %s", exc)
+            verified = None
+            for attempt in range(6):
+                if attempt:
+                    await asyncio.sleep(0.4)
+                fresh = printer_manager.get_status(body.printer_id)
+                if not fresh or not fresh.connected:
+                    break
+                unit = next((u for u in fresh.raw_data.get("ams", []) if isinstance(u, dict) and u.get("module_type") == "snapmaker_u1"), None)
+                if not unit or unit.get("native_spoolman_snapshot_complete") is not True:
+                    continue
+                tray = next((t for t in unit.get("tray", []) if t.get("id") == body.tray_id), None)
+                if tray and tray.get("spoolman_spool_id") == body.spoolman_spool_id:
+                    verified = fresh.raw_data["ams"]
+                    break
+            if verified is None:
+                return {"outcome": "unverified", "printer_side": "unverified", "printbuddy": "unchanged", "location": "unchanged"}
+            from backend.app.services.spoolman_location_sync import sync_native_spool_slots
+
+            mirror_status = "saved"
+            try:
+                await sync_native_spool_slots(db, client, body.printer_id, verified)
+                location = "disabled"
+                if location_enabled:
+                    # A status callback may have mirrored the slot before this request.
+                    # Reconcile explicitly so a prior location PATCH failure can retry.
+                    await reconcile_spool_locations(db, client, {body.spoolman_spool_id, body.expected_spool_id or 0})
+                    actual = await client.get_spool(body.spoolman_spool_id)
+                    location = "synchronized" if location_name and actual.get("location") == location_name else "failed"
+            except Exception:
+                logger.exception("U1 assignment verified but native mirror/location update failed")
+                mirror_status = "failed"
+                location = "failed"
+            return {"outcome": "success" if location != "failed" and mirror_status == "saved" else "partial_success", "printer_side": "verified", "printbuddy": mirror_status, "location": location}
+        try:
+            _validate_spoolman_slot_shape(body.ams_id, body.tray_id)
+            legacy_result = await _assign_spoolman_slot_impl(SpoolSlotAssignmentRequest(spoolman_spool_id=body.spoolman_spool_id, printer_id=body.printer_id, ams_id=body.ams_id, tray_id=body.tray_id), db, user, include_sync_result=True)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, "PrintBuddy assignment failed") from exc
+        # Legacy MQTT publish confirms transmission only; firmware acceptance is not verified.
+        location = "disabled"
+        if location_enabled:
+            try:
+                async with _translate_spoolman_errors():
+                    updated = await client.get_spool(body.spoolman_spool_id)
+                location = "synchronized" if location_name and updated.get("location") == location_name else "failed"
+            except Exception:
+                location = "failed"
+        printer_side = "failed" if legacy_result.get("printer_side") == "failed" else "unverified"
+        return {"outcome": "partial_success", "printer_side": printer_side, "printbuddy": "saved", "location": location}
 
 
 @router.delete("/slot-assignments/{spoolman_spool_id}")

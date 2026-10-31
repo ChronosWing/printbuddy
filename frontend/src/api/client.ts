@@ -5478,6 +5478,10 @@ export const api = {
     request<InventorySpool[]>(`/spoolman/inventory/spools?include_archived=${includeArchived}`),
   getSpoolmanInventorySpool: (id: number) =>
     request<InventorySpool>(`/spoolman/inventory/spools/${id}`),
+  previewConfirmedSpoolAssignment: () =>
+    request<{ printers: Array<{ printer_id: number; name: string; slots: Array<{ ams_id: number; tray_id: number; label: string; current_spool_id: number | null; fingerprint: string; replacement_required: boolean; color: string | null; material: string | null; filament_name: string | null; available: boolean; reason: string | null; mechanism: string }> }> }>('/spoolman/inventory/confirmed-assignments/preview'),
+  confirmSpoolAssignment: (data: { spoolman_spool_id: number; printer_id: number; ams_id: number; tray_id: number; expected_spool_id: number | null; expected_slot_fingerprint: string; replacement_acknowledged: boolean }) =>
+    request<{ outcome: string; printer_side: string; printbuddy: string; location: string }>('/spoolman/inventory/confirmed-assignments', { method: 'POST', body: JSON.stringify(data) }),
   createSpoolmanInventorySpool: (
     data: Omit<InventorySpool, 'id' | 'archived_at' | 'created_at' | 'updated_at' | 'k_profiles'> & { spool_weight?: number | null; spoolman_filament_id?: number | null },
   ) =>

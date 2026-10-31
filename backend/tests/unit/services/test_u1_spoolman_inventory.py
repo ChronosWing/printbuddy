@@ -55,6 +55,22 @@ def trays(client):
     return client.state.raw_data["ams"][0]["tray"]
 
 
+def test_native_assignment_command_uses_real_channel_and_requires_support(setup_u1, monkeypatch):
+    client, _, _, _ = setup_u1
+    post = Mock(return_value={})
+    monkeypatch.setattr(client, "_post", post)
+    monkeypatch.setattr(client, "_available_macro_names", lambda: {"SET_SPOOL_ID"})
+    assert client.supports_u1_spool_assignment() is True
+    assert client.assign_u1_spool(2, 38) is True
+    post.assert_called_with("printer/gcode/script", {"script": "SET_SPOOL_ID LANE=E2 SPOOL_ID=38"})
+    post.reset_mock()
+    assert client.assign_u1_spool(4, 38) is False
+    assert client.assign_u1_spool(0, 0) is False
+    post.assert_not_called()
+    monkeypatch.setattr(client, "_available_macro_names", lambda: set())
+    assert client.supports_u1_spool_assignment() is False
+
+
 def test_four_authoritative_ids_weight_colors_and_read_only_requests(setup_u1):
     client, status, _, post = setup_u1
     client._apply_snapmaker_u1_status(status)
